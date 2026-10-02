@@ -170,7 +170,7 @@ export function workerForPull(workers: Iterable<WorkerInfo>, pr: { number: numbe
   return undefined;
 }
 
-class Store {
+export class Store {
   you = '';
   profile: Profile = { name: 'Guest', color: AVATAR_COLORS[1], look: randomLook() };
   peers = new Map<string, PeerInfo>();

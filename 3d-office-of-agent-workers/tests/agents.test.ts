@@ -60,6 +60,6 @@ test('reasoning effort joins Claude for DeepSeek Harness', () => {
   assert.match(validateWorkerEffort('agent', 'dsh', 'enormous') ?? '', /Invalid effort/);
   assert.match(validateWorkerEffort('shell', 'dsh', 'high') ?? '', /Shell workers/);
   assert.equal(validateWorkerEffort('agent', 'claude', 'xhigh'), undefined);
-  assert.match(validateWorkerEffort('agent', 'opencode', 'high') ?? '', /Claude Code, Grok, Muse or DeepSeek Harness/);
-  assert.match(validateWorkerEffort('agent', 'codex', 'high') ?? '', /Claude Code, Grok, Muse or DeepSeek Harness/);
+  assert.match(validateWorkerEffort('agent', 'opencode', 'high') ?? '', /Reasoning effort can only be selected for Claude Code/);
+  assert.match(validateWorkerEffort('agent', 'codex', 'high') ?? '', /Reasoning effort can only be selected for Claude Code/);
 });

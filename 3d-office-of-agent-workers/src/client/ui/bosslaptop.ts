@@ -3,7 +3,7 @@ import { h, openModal, type Modal } from './dom';
 import { ScreenZoom } from './arcade';
 import { Minesweeper, W, H } from './minesweeper';
 import type { Net } from '../net';
-import type { Store } from '../store';
+import type { Store } from '../state';
 import type { WorkerInfo } from '../../shared/protocol';
 import { isBusy } from '../../shared/status';
 
@@ -1170,7 +1170,7 @@ export class BossLaptop {
         breadcrumb.replaceChildren(
           h('span', {}, '📁 '),
           h('span.file-name', {}, this.currentFilePath),
-          this.isFileDirty ? h('span.dirty-dot', {}, ' ● Unsaved') : false,
+          ...(this.isFileDirty ? [h('span.dirty-dot', {}, ' ● Unsaved')] : []),
         );
       } else {
         breadcrumb.textContent = 'Select a file from the explorer to view or edit';
@@ -1258,7 +1258,7 @@ export class BossLaptop {
         breadcrumb.replaceChildren(
           h('span', {}, '📁 '),
           h('span.file-name', {}, this.currentFilePath!),
-          this.isFileDirty ? h('span.dirty-dot', {}, ' ● Unsaved') : false,
+          ...(this.isFileDirty ? [h('span.dirty-dot', {}, ' ● Unsaved')] : []),
         );
       }
       if (discardBtn) discardBtn.style.display = this.isFileDirty ? 'inline-flex' : 'none';
@@ -1319,7 +1319,7 @@ export class BossLaptop {
         game.pressed = i;
         canvas.setPointerCapture(e.pointerId);
       }
-      game.draw(canvas.getContext('2d')!);
+      game.paint(canvas.getContext('2d')!, false);
     });
 
     canvas.addEventListener('pointermove', (e) => {
@@ -1328,7 +1328,7 @@ export class BossLaptop {
       if (i === game.hover) return;
       game.hover = i;
       if (holding) game.pressed = i;
-      game.draw(canvas.getContext('2d')!);
+      game.paint(canvas.getContext('2d')!, false);
     });
 
     canvas.addEventListener('pointerup', (e) => {
@@ -1338,13 +1338,13 @@ export class BossLaptop {
       game.pressed = -1;
       if (game.isOpen(i)) game.chord(i);
       else game.open(i);
-      game.draw(canvas.getContext('2d')!);
+      game.paint(canvas.getContext('2d')!, false);
     });
 
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
     // Initial draw
-    requestAnimationFrame(() => game.draw(canvas.getContext('2d')!));
+    requestAnimationFrame(() => game.paint(canvas.getContext('2d')!, false));
 
     return h('div', { style: 'flex: 1; display: flex; overflow: hidden;' }, canvas);
   }

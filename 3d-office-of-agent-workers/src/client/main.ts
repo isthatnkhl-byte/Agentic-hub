@@ -296,6 +296,7 @@ function syncPeerHardwareMonitors() {
       id: store.you || 'host',
       name: store.profile.name || 'Host',
       color: store.profile.color || '#4f86f7',
+      look: store.profile.look,
       x: 0, y: 0, z: 0, rotY: 0, moving: false, voice: false, muted: true, sharing: false,
     }];
   }
@@ -407,14 +408,6 @@ const tvMat = office.tvScreen.material as THREE.MeshBasicMaterial;
 tvMat.color.set('#ffffff');
 tvMat.map = tvIdle;
 tvMat.toneMapped = false;
-// The boss's monitor upstairs: Boss Laptop OS, Custom IDE & Total Control Interface.
-const bossLaptop = new BossLaptop(office.bossScreen, net, store, {
-  openTerminal: (id) => openWorkerTerminal(id),
-  promptWorker: (deskId) => promptAtDesk(deskId),
-  openChanges: (id) => openWorkerChanges(id),
-  killWorker: (id) => killWorker(id),
-  hireWorker: () => hireNearestDesk(),
-});
 
 // ---- The rooftop bar ------------------------------------------------------------------------------
 /** Up on the roof: built the first time anyone goes up there. */
@@ -453,6 +446,15 @@ const drunkVision = new DrunkVision(renderer);
 // ---- Networking & state -------------------------------------------------------------------------
 const net = new Net(() => store.profile, whereNow);
 const voice = new Voice(net);
+
+// The boss's monitor upstairs: Boss Laptop OS, Custom IDE & Total Control Interface.
+const bossLaptop = new BossLaptop(office.bossScreen, net, store, {
+  openTerminal: (id) => openWorkerTerminal(id),
+  promptWorker: (deskId) => promptAtDesk(deskId),
+  openChanges: (id) => openWorkerChanges(id),
+  killWorker: (id) => killWorker(id),
+  hireWorker: () => hireNearestDesk(),
+});
 
 const me = new Person(store.profile.name, store.profile.color, store.profile.look);
 me.showLabel(false);
