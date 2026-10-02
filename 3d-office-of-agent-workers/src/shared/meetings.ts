@@ -1,7 +1,7 @@
 // The meeting room's patterns: how 2–5 workers at the table work on one question or task together.
 // The server runs them (server/meetings.ts); the client offers them when a meeting is called.
 
-import { fmtCost, fmtTokens, type Meeting, type MeetingPattern, type MeetingRecord } from './protocol.js';
+import { fmtCost, fmtTokens, type Meeting, type MeetingPattern, type MeetingRecord, type SwarmRole } from './protocol.js';
 
 export interface PatternDef {
   icon: string;
@@ -75,9 +75,28 @@ export const MEETING_PATTERNS: Record<MeetingPattern, PatternDef> = {
     output: (_slug, pr) => `reviews/pr-${pr ?? 'n'}.md`,
     needs: 'pr',
   },
+  swarm: {
+    icon: '🐝',
+    label: 'Swarm',
+    blurb: 'One planner writes plan.json, then independent specialists work in parallel up to your worker limits.',
+    roles: ['Planner'],
+    seats: { min: 1, max: 1, default: 1 },
+    rounds: { min: 1, max: 1, default: 1 },
+    roundsNote: 'Plan once, then run the routed tasks.',
+    output: () => 'plan.json',
+  },
 };
 
 export const MEETING_PATTERN_IDS = Object.keys(MEETING_PATTERNS) as MeetingPattern[];
+
+export const SWARM_ROLE_PROFILES: Record<SwarmRole, { label: string; guidance: string }> = {
+  frontend: { label: 'Frontend designer and auditor', guidance: 'Follow the existing visual system; check responsive layouts, accessibility, interaction states, and text fit. Keep changes within assigned UI files and run focused client checks.' },
+  backend: { label: 'Backend engineer', guidance: 'Trace existing server contracts and ownership boundaries; validate inputs, persistence, errors, and focused server tests. Do not broaden APIs beyond the assigned task.' },
+  testing: { label: 'Test engineer', guidance: 'Add or strengthen focused regression tests for the assigned behavior. Prefer existing fixtures and test patterns; do not modify production code unless the task explicitly requires a testability seam.' },
+  security: { label: 'Security auditor', guidance: 'Inspect the assigned boundary for concrete threats, cite code paths and exploit preconditions, and make only scoped fixes backed by regression tests. Never weaken authentication or permissions to make a test pass.' },
+  documentation: { label: 'Documentation specialist', guidance: 'Update the nearest authoritative docs and examples to match actual behavior. Verify commands and avoid documenting unimplemented guarantees.' },
+  general: { label: 'General engineer', guidance: 'Follow repository instructions, reuse local abstractions, keep changes scoped, and run the narrowest relevant validation.' },
+};
 
 export function isMeetingPattern(v: unknown): v is MeetingPattern {
   // Own keys only: `in` would also take the prototype's (constructor, toString…), and those crash the server.
@@ -144,9 +163,18 @@ export function meetingStage(m: Meeting): string {
  */
 export function meetingSummary(m: Meeting): string {
   const p = MEETING_PATTERNS[m.pattern];
+  if (m.pattern === 'swarm') {
+    const total = m.swarmTasks?.length ?? 0;
+    const succeeded = m.swarmTasks?.filter((task) => task.status === 'done').length ?? 0;
+    const head = `${p.icon} ${p.label} · ${meetingSpend(m)}`;
+    if (m.status === 'running') return `${head} · ${succeeded}/${total} tasks complete`;
+    if (m.status === 'done') return `${head} · ✅ all ${total} tasks finished`;
+    return `${head} · ${m.status === 'partial' ? '⚠️ partial' : '⛔ stopped'} · ${m.reason ?? 'not all tasks finished'}`;
+  }
   const ran = m.status === 'done' ? rounds(m.round) : `${m.status === 'stopped' ? 'in ' : ''}round ${m.round} of ${m.rounds}`;
   const head = `${p.icon} ${p.label} · ${ran} · ${meetingSpend(m)}`;
   if (m.status === 'stopped') return `${head} · ⛔ ${m.reason ?? 'stopped'}`;
+  if (m.status === 'partial') return `${head} · ⚠️ partial · ${m.reason ?? 'some workers did not finish'}`;
   if (m.status === 'running') return head;
   const where = m.review?.url ? ' · posted on the PR' : m.review?.error ? ` · couldn't post it: ${m.review.error}` : m.commit ? ` on ${m.worktree?.branch}` : m.worktree ? ` in ${m.worktree.branch}'s worktree` : '';
   return `${head} · ✅ ${m.output}${where}`;

@@ -28,6 +28,8 @@ function outcome(t: QueueTask): string {
       return 'sent home';
     case 'failed':
       return `couldn't start: ${t.error ?? 'unknown error'}`;
+    case 'blocked':
+      return `blocked: ${t.error ?? 'a prerequisite did not finish'}`;
     default:
       return '';
   }
@@ -89,6 +91,8 @@ export function openQueue(net: Net, actions: QueueActions) {
     const buttons: HTMLElement[] = [];
     const badge = modelBadge(t.provider, t.model, t.effort);
     const model = badge ? ` · initial: ${badge}` : '';
+    if (t.swarmId) meta.push(`🐝 ${t.swarmRole ?? 'specialist'} · ${t.swarmRouteReason ?? 'swarm route'}`);
+    if (t.swarmDependsOn?.length && t.status === 'queued') meta.push(`waiting for ${t.swarmDependsOn.length} prerequisite${t.swarmDependsOn.length === 1 ? '' : 's'}`);
     const usageSuffix = (provider: AgentProvider | undefined, usage?: Usage) => {
       const state = providerUsageState(provider, store.project, usage);
       if (state === 'untracked') return ' · usage untracked';

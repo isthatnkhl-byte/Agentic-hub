@@ -1,12 +1,14 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { MEETING_SEATS } from '../shared/layout.js';
 import { MAX_MEETING_BUDGET, MEETING_NOTES_DIR, MEETING_PATTERNS, TOKENS_PER_SEAT, isMeetingPattern, meetingRecord, outputProblem, slugify } from '../shared/meetings.js';
-import { fmtTokens, isAgentEffort, isAgentProvider, tokensOf, type AgentChoice, type AgentEffort, type AgentProvider, type Meeting, type MeetingRecord, type MeetingRequest, type MeetingState, type MeetingTurn, type WorkerInfo, type WorkerStatus } from '../shared/protocol.js';
-import { validateWorkerEffort, validateWorkerModel } from './agents.js';
+import { fmtTokens, isAgentEffort, isAgentProvider, tokensOf, type AgentChoice, type AgentEffort, type AgentProvider, type Meeting, type MeetingRecord, type MeetingRequest, type MeetingState, type MeetingSwarmTask, type MeetingTurn, type QueueState, type WorkerInfo, type WorkerStatus } from '../shared/protocol.js';
+import { agentProviders, validateWorkerEffort, validateWorkerModel } from './agents.js';
+import { parseSwarmPlan, SWARM_TASKS_MAX, SWARM_TASKS_MIN } from './swarm-plan.js';
+import { buildSwarmContexts } from './swarm-context.js';
 import { gitError, type WorktreeRef, type WorktreeState } from './worktrees.js';
 import { PROMPTS, fillPrompt, type PromptId, type PromptVars } from '../shared/prompts.js';
 
@@ -24,6 +26,10 @@ export interface MeetingWorkers {
   /** Keys into its terminal: Esc, to stop what it's doing. */
   write(id: string, data: string, by: string): void;
   kill(id: string): Promise<{ note?: string; error?: string }>;
+  availableProviders?(): AgentProvider[];
+  queueSwarm?(task: MeetingSwarmTask, options: { swarmId: string; maxParallel: number; by: string; provider: AgentProvider; model?: string; effort?: AgentEffort; owner?: string; createdById?: string }): string | undefined;
+  queueState?(): QueueState;
+  cancelSwarm?(swarmId: string): void;
 }
 
 /** Git for the meeting's own worktree: made when it starts, tidied away once everyone has gone home. */
@@ -54,6 +60,7 @@ const PAST_MAX = 20;
 const PROMPT_MAX = 20_000;
 const ROLE_MAX = 40;
 const PARTS_MAX = 100;
+const SWARM_PARALLEL_MAX = 20;
 /** Who the office types a meeting's prompts as. */
 const BY = 'the meeting room';
 /** What a red team or a reviewer writes when it has nothing to report. */
@@ -150,9 +157,13 @@ export class MeetingRoom {
     const title = (String(req.title ?? '').replace(/\s+/g, ' ').trim() || (pr !== undefined && req.pattern === 'review' ? `Review of PR #${pr}` : firstLine(prompt))).slice(0, 100);
     const id = randomBytes(4).toString('hex');
     const slug = slugify(title, 32);
-    const output = String(req.output ?? '').trim() || pattern.output(slug, pr);
+    const output = req.pattern === 'swarm' ? 'plan.json' : String(req.output ?? '').trim() || pattern.output(slug, pr);
     const outputBad = outputProblem(output);
     if (outputBad) return outputBad;
+    if (req.pattern === 'swarm' && !this.trees) return 'Swarm needs a Git project so planner and specialist workers can use isolated worktrees';
+    if (req.pattern === 'swarm' && existsSync(path.join(this.dir, output))) return 'The project already has plan.json; move it aside before starting a swarm';
+    const swarmLimit = req.pattern === 'swarm' ? Math.floor(Number(req.swarmLimit) || 3) : undefined;
+    if (req.pattern === 'swarm' && (swarmLimit! < 1 || swarmLimit! > SWARM_PARALLEL_MAX)) return `A swarm can run 1 to ${SWARM_PARALLEL_MAX} workers at once`;
 
     // The last meeting's workers make room: they go home, and their worktree is tidied away after them.
     const last = this.current;
@@ -185,6 +196,7 @@ export class MeetingRoom {
       round: 1,
       step: 1,
       turns: [],
+      swarmLimit,
       budget,
       tokens: 0,
       cost: 0,
@@ -226,6 +238,17 @@ export class MeetingRoom {
     const m = this.current;
     if (!m || m.status !== 'running') return 'No meeting is on';
     this.halt(m, `stopped by ${by}`);
+    if (m.pattern === 'swarm') {
+      this.workers.cancelSwarm?.(m.id);
+      for (const task of m.swarmTasks ?? []) {
+        if (task.status === 'done' || task.status === 'failed' || task.status === 'blocked' || task.status === 'cancelled') continue;
+        task.status = 'cancelled';
+        task.outcome = 'killed';
+        task.error = 'Stopped with the swarm';
+      }
+      this.changed();
+      this.persistSwarmReport(m);
+    }
     return undefined;
   }
 
@@ -253,6 +276,7 @@ export class MeetingRoom {
 
   pump() {
     if (this.closing) return;
+    if (this.current?.pattern === 'swarm' && this.current.swarmTasks) this.syncSwarm(this.current);
     if (this.pumping) {
       this.again = true;
       return;
@@ -278,7 +302,7 @@ export class MeetingRoom {
 
   private tick() {
     const m = this.current;
-    if (m?.status === 'running' && this.readPreview(m)) this.dirty = true;
+    if (m?.status === 'running' && m.pattern !== 'swarm' && this.readPreview(m)) this.dirty = true;
     this.pump();
     if (this.dirty) this.changed();
   }
@@ -286,6 +310,7 @@ export class MeetingRoom {
   private run() {
     const m = this.current;
     if (!m) return;
+    if (m.pattern === 'swarm' && m.swarmTasks) return this.syncSwarm(m);
     const byId = new Map(this.workers.list().map((w) => [w.id, w]));
     if (this.tally(m, byId)) this.dirty = true;
     if (m.status !== 'running') {
@@ -380,6 +405,7 @@ export class MeetingRoom {
 
   /** Every part of the step is written: on to the next step, the next round, or the end. */
   private next(m: Meeting) {
+    if (m.pattern === 'swarm') return this.launchSwarm(m);
     // Red / blue: the red team found nothing more to fix, so blue writes it up this round.
     if (m.pattern === 'redblue' && m.step === 1 && NOTHING.test(this.head(m, m.turns[0]?.file))) m.lastRound = m.round;
     const more = this.plan(m, m.round, m.step + 1);
@@ -403,8 +429,9 @@ export class MeetingRoom {
     m.status = 'done';
     m.finishedAt = Date.now();
     m.turns = [];
-    this.readPreview(m);
+    if (m.pattern !== 'swarm') this.readPreview(m);
     this.keepNotes(m);
+    if (m.pattern === 'swarm') this.persistSwarmReport(m);
     const p = MEETING_PATTERNS[m.pattern];
     this.events.toast(`🤝 The ${p.label} meeting on “${m.title}” is done: it wrote ${m.output}`, 'info');
     const cwd = this.cwd(m);
@@ -444,8 +471,9 @@ export class MeetingRoom {
     m.finishedAt = Date.now();
     const busy = new Set(this.workers.list().filter((w) => w.status === 'working' || w.status === 'needs_input').map((w) => w.id));
     for (const s of m.seats) if (s.workerId && busy.has(s.workerId)) this.workers.write(s.workerId, '\x1b', BY);
-    this.readPreview(m);
+    if (m.pattern !== 'swarm') this.readPreview(m);
     this.keepNotes(m);
+    if (m.pattern === 'swarm') this.persistSwarmReport(m);
     this.events.toast(`⛔ The meeting on “${m.title}” stopped in round ${m.round}: ${reason}`, 'warn');
     this.changed();
   }
@@ -516,6 +544,7 @@ export class MeetingRoom {
     const others = m.seats.filter((_, j) => j !== i).map((s) => `the ${s.role}`);
     const head = m.seats[0].role;
     const how: Record<Meeting['pattern'], string> = {
+      swarm: 'Plan the master prompt into small, independent specialist tasks. Write only plan.json now; the office starts the routed workers after validating it.',
       debate: `Round 1: everyone proposes an answer. Each round after that until the last: everyone reads the others' latest notes, critiques them and revises their own. Last round: the ${head} writes the decision.`,
       lead: `Round 1: the ${head} splits the task into a part for each of the others and writes the plan. Round 2: each of them does their part. Round 3: the ${head} merges the work, checks it and writes it up.`,
       mapreduce: `Round 1: each mapper does the task over its own parts. Round 2: the ${head} combines what they found into one result.`,
@@ -621,6 +650,21 @@ export class MeetingRoom {
         const wrap = last ? ` This is the last round: once you've fixed things, also write ${A(m.output)}: every finding from every round (${A(m.notes)}/), what was fixed and how, and what's still open. That file is the meeting's output.` : '';
         return [{ seat: blue, doing: last ? 'fixing and writing it up' : 'fixing', file: last ? m.output : blueNote, ask: this.say('meeting.redblue.fix', { findings: A(redNote), file: A(blueNote), lastRound: wrap, output: A(m.output) }) }];
       }
+      case 'swarm': {
+        if (round !== 1 || step !== 1) return null;
+        const project = path.basename(this.dir);
+        const providers = this.workers.availableProviders?.() ?? agentProviders(this.workers.defaultProvider);
+        const ask = [
+          `You are the swarm planner for the ${project} project. This is the first model call: do not implement the requested work yourself and do not start any agents.`,
+          `Analyze the repository and master prompt, then create exactly one root-level file in this isolated meeting worktree: ${A('plan.json')}. It must be valid JSON, with no markdown fences, in this v1 shape:`,
+          JSON.stringify({ schemaVersion: 1, title: 'Short outcome', tasks: [{ id: 'frontend-settings', 'agent-name': 'frontend worker', work: `You're a professional frontend designer and auditor for ${project}. You're handed the following tasks: ...`, dependsOn: [], acceptanceCriteria: ['...'], context: { include: ['src/client/'], exclude: ['dist/'] }, route: { role: 'frontend', provider: 'auto' } }] }, null, 2),
+          `Create ${SWARM_TASKS_MIN} to ${SWARM_TASKS_MAX} focused tasks. Give every task a unique lowercase id, a clear specialist agent-name, a complete self-contained work instruction, and measurable acceptance criteria. Split independent work so it can run in parallel; use dependsOn only for real prerequisites and avoid overlapping file ownership.`,
+          `Use only these route roles: frontend, backend, testing, security, documentation, general. Context include/exclude entries must be safe project-relative paths, never absolute paths or ../. For provider use "auto" or one of these floor-enabled providers: ${providers.join(', ')}. Use a model/effort only when you choose an explicit compatible provider; do not invent executables or CLI arguments. The office validates the full graph before any specialist starts.`,
+          `The office stores the validated plan in private per-run state and queues every task in an isolated worktree. The selected meeting provider is the fallback for route:auto. Do not write or modify any other file.`,
+          `Master prompt:\n<master-prompt>\n${m.prompt}\n</master-prompt>`,
+        ].join('\n\n');
+        return [{ seat: 0, doing: 'planning the swarm', file: m.output, ask }];
+      }
       case 'review': {
         if (step > 1) return null;
         if (round === 1) {
@@ -633,6 +677,166 @@ export class MeetingRoom {
         }
         return [{ seat: 0, doing: 'writing the review', file: m.output, ask: this.say('meeting.review.combine', { findings: notes(1, all), exampleRole: m.seats[1]?.role ?? 'Security', output: A(m.output) }) }];
       }
+    }
+  }
+
+  private launchSwarm(m: Meeting) {
+    if (!this.workers.queueSwarm || !this.workers.queueState) return this.halt(m, 'the swarm task queue is unavailable');
+    const planPath = path.join(this.cwd(m), m.output);
+    let planText: string;
+    try {
+      const st = lstatSync(planPath);
+      if (!st.isFile() || st.isSymbolicLink() || st.size > 256_000) throw new Error('plan.json must be a regular file no larger than 256 KB');
+      planText = readFileSync(planPath, 'utf8');
+    } catch (err) {
+      return this.halt(m, `could not read plan.json: ${(err as Error).message}`);
+    }
+    const available = this.workers.availableProviders?.() ?? agentProviders(this.workers.defaultProvider);
+    const parsed = parseSwarmPlan(planText, available);
+    if (typeof parsed === 'string') return this.halt(m, parsed);
+    const contextManifests = buildSwarmContexts(this.cwd(m), parsed.tasks);
+    const tasks: MeetingSwarmTask[] = parsed.tasks.map((task) => {
+      const provider = task.route.provider === 'auto' ? m.provider ?? this.workers.defaultProvider : task.route.provider;
+      const explicit = task.route.provider !== 'auto';
+      return {
+        ...task,
+        id: `${m.id}-${task.id}`,
+        role: task.route.role,
+        provider,
+        model: explicit ? task.route.model : m.model,
+        effort: explicit ? task.route.effort : m.effort,
+        routeReason: explicit ? `plan route for ${task.route.role}` : `meeting provider default for ${task.route.role}`,
+        contextManifest: contextManifests.get(task.id) ?? { files: [] },
+        enqueued: false,
+        status: 'queued',
+      };
+    });
+
+    const planStateDir = path.join(this.dataDir, 'meetings', m.id);
+    try {
+      mkdirSync(planStateDir, { recursive: true, mode: 0o700 });
+      writeFileSync(path.join(planStateDir, 'plan.json'), planText, { mode: 0o600 });
+      unlinkSync(planPath);
+    } catch (err) {
+      return this.halt(m, `could not persist the validated plan: ${(err as Error).message}`);
+    }
+
+    m.swarmTasks = tasks;
+    m.swarmPlanPath = `.agent-office/meetings/${m.id}/plan.json`;
+    m.preview = planText.slice(0, PREVIEW_CHARS);
+    m.turns = [];
+    const plannerId = m.seats[0]?.workerId;
+    if (m.seats[0]) m.seats[0].workerId = undefined;
+    this.changed();
+    for (const task of tasks) {
+      const error = this.enqueueSwarmTask(m, task);
+      if (error) {
+        task.enqueued = true;
+        task.status = 'failed';
+        task.outcome = 'failed';
+        task.error = error;
+      } else {
+        task.enqueued = true;
+      }
+      this.changed();
+    }
+    if (plannerId) void this.workers.kill(plannerId);
+    this.changed();
+    this.syncSwarm(m);
+  }
+
+  private enqueueSwarmTask(m: Meeting, task: MeetingSwarmTask): string | undefined {
+    if (!this.workers.queueSwarm) return 'the swarm task queue is unavailable';
+    return this.workers.queueSwarm(task, {
+      swarmId: m.id,
+      maxParallel: m.swarmLimit ?? 3,
+      by: `${m.calledBy} (swarm)`,
+      provider: task.provider,
+      model: task.model,
+      effort: task.effort,
+      owner: m.owner,
+      createdById: m.createdById,
+    });
+  }
+
+  private syncSwarm(m: Meeting) {
+    if (!m.swarmTasks) return;
+    const queued = this.workers.queueState?.().tasks ?? [];
+    let changed = false;
+    for (const task of m.swarmTasks) {
+      const current = queued.find((t) => t.id === task.id);
+      if (current) {
+        const status: MeetingSwarmTask['status'] = current.status !== 'done'
+          ? current.status
+          : current.outcome === 'done' ? 'done' : current.outcome === 'blocked' ? 'blocked' : current.outcome === 'killed' ? 'cancelled' : 'failed';
+        if (!task.enqueued || task.status !== status || task.workerName !== current.workerName || task.outcome !== current.outcome || task.error !== current.error || task.workerId !== current.workerId || task.branch !== current.branch || task.pr?.number !== current.pr?.number) {
+          Object.assign(task, { enqueued: true, status, workerName: current.workerName, outcome: current.outcome, error: current.error, workerId: current.workerId, branch: current.branch, pr: current.pr });
+          changed = true;
+        }
+      } else if (m.status === 'running' && task.status === 'queued' && !task.enqueued) {
+        const error = this.enqueueSwarmTask(m, task);
+        task.enqueued = true;
+        if (error) {
+          task.status = 'failed';
+          task.outcome = 'failed';
+          task.error = error;
+        }
+        changed = true;
+      } else if (m.status === 'running' && !['done', 'failed', 'blocked', 'cancelled'].includes(task.status)) {
+        Object.assign(task, { status: 'cancelled' as const, outcome: 'killed' as const, error: 'Removed from the queue' });
+        changed = true;
+      }
+    }
+    let finalized = false;
+    if (m.status === 'running' && m.swarmTasks.every((t) => ['done', 'failed', 'blocked', 'cancelled'].includes(t.status))) {
+      const succeeded = m.swarmTasks.filter((t) => t.status === 'done').length;
+      m.status = succeeded === m.swarmTasks.length ? 'done' : succeeded > 0 ? 'partial' : 'stopped';
+      m.finishedAt = Date.now();
+      if (m.status !== 'done') {
+        const unsuccessful = m.swarmTasks.length - succeeded;
+        m.reason = `${succeeded} of ${m.swarmTasks.length} tasks succeeded; ${unsuccessful} failed, blocked, or cancelled`;
+      }
+      this.keepNotes(m);
+      this.persistSwarmReport(m);
+      this.events.toast(m.status === 'done' ? `🐝 The swarm for “${m.title}” finished ${m.swarmTasks.length} tasks` : `🐝 The swarm for “${m.title}” finished partially: ${m.reason}`, m.status === 'done' ? 'info' : 'warn');
+      changed = true;
+      finalized = true;
+    }
+    if (changed) {
+      if (m.status !== 'running' && !finalized) this.persistSwarmReport(m);
+      this.changed();
+    }
+  }
+
+  private persistSwarmReport(m: Meeting) {
+    const directory = path.join(this.dataDir, 'meetings', m.id);
+    const file = path.join(directory, 'summary.json');
+    const temporary = `${file}.${process.pid}.tmp`;
+    const report = {
+      schemaVersion: 1,
+      id: m.id,
+      title: m.title,
+      masterPrompt: m.prompt,
+      status: m.status,
+      reason: m.reason,
+      startedAt: m.startedAt,
+      finishedAt: m.finishedAt,
+      calledBy: m.calledBy,
+      plan: m.swarmPlanPath,
+      parallelLimit: m.swarmLimit,
+      sourceCommit: m.swarmTasks?.find((task) => task.contextManifest?.baseCommit)?.contextManifest?.baseCommit,
+      tasks: m.swarmTasks?.map(({ id, agentName, role, work, provider, model, effort, routeReason, dependsOn, acceptanceCriteria, status, outcome, error, workerName, branch, pr, contextManifest }) => ({
+        id, agentName, role, work, provider, model, effort, routeReason, dependsOn, contextManifest,
+        acceptanceCriteria: acceptanceCriteria.map((criterion) => ({ criterion, status: 'not-verified' })),
+        status, outcome, error, workerName, branch, pr,
+      })) ?? [],
+    };
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      writeFileSync(temporary, JSON.stringify(report, null, 2), { mode: 0o600 });
+      renameSync(temporary, file);
+    } catch (error) {
+      this.events.toast(`Couldn't save the swarm summary: ${(error as Error).message}`, 'warn');
     }
   }
 

@@ -21,6 +21,7 @@ export function routeAccountsMessage(msg: ServerMsg) {
 /** 🔑 Accounts, for admins: invite people by link, list them, change their role or revoke them. */
 export function openAccounts(net: Net) {
   let status: HTMLElement | null = null;
+  let officePasswordStatus: HTMLElement | null = null;
   /** The invite just made, shown big until the next one. */
   let fresh: AccountInvite | null = null;
   const body = h('div.body.team.accounts');
@@ -42,6 +43,36 @@ export function openAccounts(net: Net) {
     e.preventDefault();
     inviteBtn.disabled = true;
     net.send({ t: 'accounts.invite', name: nameInput.value.trim() || undefined, role: roleSelect.value as AccountRole });
+  });
+
+  const officePasswordInput = h('input', {
+    type: 'password', minlength: 8, maxlength: 512, placeholder: 'At least 8 characters',
+    'aria-label': 'New office password', autocomplete: 'new-password', required: true,
+  }) as HTMLInputElement;
+  const officePasswordBtn = h('button.btn.primary', { type: 'submit' }, 'Set office password');
+  const officePasswordForm = h('form.invite-row', {}, officePasswordInput, officePasswordBtn) as HTMLFormElement;
+  officePasswordForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    officePasswordBtn.setAttribute('disabled', '');
+    officePasswordStatus = null;
+    void fetch('/api/accounts/password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: officePasswordInput.value }),
+    }).then(async (res) => {
+      const result = await res.json().catch(() => ({})) as { error?: string };
+      if (!res.ok) {
+        officePasswordStatus = h('p.team-status.error', {}, result.error ?? 'Could not save the office password');
+        return;
+      }
+      officePasswordInput.value = '';
+      officePasswordStatus = h('p.team-status.ok', {}, 'Office password saved. Share it with room-code guests; they sign in with this password and their name. Account holders use their own password.');
+    }).catch(() => {
+      officePasswordStatus = h('p.team-status.error', {}, 'Could not reach the office');
+    }).finally(() => {
+      officePasswordBtn.removeAttribute('disabled');
+      render();
+    });
   });
 
   const render = () => {
@@ -133,6 +164,9 @@ export function openAccounts(net: Net) {
     });
     body.append(
       h('div.team-head', {}, h('h4', {}, 'Shared office password'), toggle),
+      officePasswordForm,
+      h('p.note', {}, 'Setting this turns shared sign-in on and requires the password for new room-code joins. The office stores only a hash; share the password separately. Single-use account invites still use each person’s own password.'),
+      ...(officePasswordStatus ? [officePasswordStatus] : []),
       h(
         'p.note',
         {},

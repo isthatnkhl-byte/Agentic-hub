@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { isAgentEffort, isAgentProvider, isClaudeModel, type AgentChoice, type AgentEffort, type AgentProvider, type GhPull, type QueueState, type QueueTask, type WorkerInfo, type WorkerStatus } from '../shared/protocol.js';
+import { isAgentEffort, isAgentProvider, isClaudeModel, type AgentChoice, type AgentEffort, type AgentProvider, type GhPull, type QueueState, type QueueTask, type SwarmContextManifest, type WorkerInfo, type WorkerStatus } from '../shared/protocol.js';
 import { DESK_BY_ID, SEATS, nextFreeSeat } from '../shared/layout.js';
 import { isValidDshModel, isValidGrokModel, isValidMuseModel, isValidOpenCodeModel, validateWorkerEffort, validateWorkerModel } from './agents.js';
 import { PROMPTS } from '../shared/prompts.js';
@@ -46,6 +46,17 @@ const PUMP_MS = 10_000;
 /** A worker in one of these states is finished with its task (and can make room for the next one). */
 const FINISHED = new Set<WorkerStatus>(['done', 'exited', 'offline']);
 
+function restoreContextManifest(value: unknown): SwarmContextManifest | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<SwarmContextManifest>;
+  if (!Array.isArray(candidate.files)) return undefined;
+  const files = candidate.files
+    .filter((file): file is { path: string; reason: string } => !!file && typeof file === 'object' && typeof file.path === 'string' && typeof file.reason === 'string')
+    .filter((file) => file.path.length <= 240 && file.reason.length <= 200 && !file.path.startsWith('/') && !file.path.split(/[\\/]/).includes('..'))
+    .slice(0, 12);
+  return { baseCommit: typeof candidate.baseCommit === 'string' && /^[a-f0-9]{40}$/i.test(candidate.baseCommit) ? candidate.baseCommit : undefined, files };
+}
+
 
 /**
  * The 📋 task queue. Tasks (GitHub issues or free text) wait in order; whenever a desk is free and
@@ -86,7 +97,7 @@ export class TaskQueue {
 
   /** Queues a task. With no `provider`, it runs on the office's default worker, model and effort included. */
   /** Queues a task; `owner` is the account adding it, whose sign-ins its worker will run on. */
-  add(prompt: string, by: string, title?: string, issue?: number, provider?: AgentProvider, model?: string, effort?: AgentEffort, owner?: string, addedById?: string): string | undefined {
+  add(prompt: string, by: string, title?: string, issue?: number, provider?: AgentProvider, model?: string, effort?: AgentEffort, owner?: string, addedById?: string, swarm?: { taskId: string; swarmId: string; limit: number; dependsOn?: string[]; acceptanceCriteria?: string[]; contextInclude?: string[]; contextExclude?: string[]; contextManifest?: SwarmContextManifest; role?: QueueTask['swarmRole']; routeReason?: string }): string | undefined {
     if (provider === undefined) ({ provider, model, effort } = this.workers.officeDefault ?? { provider: this.workers.defaultProvider });
     if (!isAgentProvider(provider) || (provider === 'custom' && this.workers.defaultProvider !== 'custom')) return 'Unknown agent provider';
     const modelError = validateWorkerModel('agent', provider, model);
@@ -95,10 +106,25 @@ export class TaskQueue {
     if (effortError) return effortError;
     const clean = prompt.replace(/\r\n?/g, '\n').trim();
     if (!clean) return 'Empty task';
+    if (swarm?.taskId) {
+      const existing = this.tasks.find((task) => task.id === swarm.taskId);
+      if (existing) return existing.swarmId === swarm.swarmId ? undefined : 'That task id is already in use';
+    }
     if (issue !== undefined && this.tasks.some((t) => t.issue === issue && t.status !== 'done')) return `Issue #${issue} is already on the queue`;
     if (this.tasks.filter((t) => t.status !== 'done').length >= MAX_TASKS) return `The queue is full (${MAX_TASKS} tasks)`;
     const task: QueueTask = {
-      id: randomBytes(6).toString('hex'),
+      id: swarm?.taskId || randomBytes(6).toString('hex'),
+      ...(swarm ? {
+        swarmId: swarm.swarmId,
+        swarmLimit: swarm.limit,
+        swarmDependsOn: swarm.dependsOn ?? [],
+        swarmAcceptanceCriteria: swarm.acceptanceCriteria ?? [],
+        swarmContextInclude: swarm.contextInclude ?? [],
+        swarmContextExclude: swarm.contextExclude ?? [],
+        swarmContextManifest: swarm.contextManifest,
+        swarmRole: swarm.role,
+        swarmRouteReason: swarm.routeReason,
+      } : {}),
       provider,
       model: provider === 'opencode' || provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'dsh' || provider === 'gemini' || provider === 'openrouter' || provider === 'api' || provider === 'antigravity' ? model : undefined,
       effort: provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'dsh' || provider === 'gemini' || provider === 'openrouter' || provider === 'api' || provider === 'antigravity' ? effort : undefined,
@@ -122,9 +148,25 @@ export class TaskQueue {
     if (!t) return 'No such task';
     if (t.status === 'running') return `${t.workerName ?? 'Its worker'} is on it — send the worker home to stop it`;
     this.tasks.splice(this.tasks.indexOf(t), 1);
+    this.blockDependents(new Set([t.id]), `Blocked by removed dependency ${t.title}`);
     this.changed();
     this.pump();
     return undefined;
+  }
+
+  cancelSwarm(swarmId: string) {
+    let changed = false;
+    for (const task of this.tasks.slice()) {
+      if (task.swarmId !== swarmId) continue;
+      if (task.status === 'queued') {
+        this.tasks.splice(this.tasks.indexOf(task), 1);
+        changed = true;
+      } else if (task.status === 'running' && task.workerId) {
+        void this.workers.kill(task.workerId);
+      }
+    }
+    if (changed) this.changed();
+    this.pump();
   }
 
   /** Takes a closed issue's waiting task off the queue (a running one carries on). Returns whether there was one. */
@@ -156,7 +198,7 @@ export class TaskQueue {
     if (t.status !== 'done') return 'That task is still on the queue';
     if (t.issue !== undefined && this.tasks.some((x) => x !== t && x.issue === t.issue && x.status !== 'done')) return `Issue #${t.issue} is already on the queue`;
     this.tasks.splice(this.tasks.indexOf(t), 1);
-    const fresh: QueueTask = { id: t.id, provider: t.provider, model: t.model, effort: t.effort, issue: t.issue, title: t.title, prompt: t.prompt, addedBy: t.addedBy, addedById: t.addedById, owner: t.owner, addedAt: Date.now(), status: 'queued' };
+    const fresh: QueueTask = { id: t.id, swarmId: t.swarmId, swarmLimit: t.swarmLimit, swarmDependsOn: t.swarmDependsOn, swarmAcceptanceCriteria: t.swarmAcceptanceCriteria, swarmContextInclude: t.swarmContextInclude, swarmContextExclude: t.swarmContextExclude, swarmContextManifest: t.swarmContextManifest, swarmRole: t.swarmRole, swarmRouteReason: t.swarmRouteReason, provider: t.provider, model: t.model, effort: t.effort, issue: t.issue, title: t.title, prompt: t.prompt, addedBy: t.addedBy, addedById: t.addedById, owner: t.owner, addedAt: Date.now(), status: 'queued' };
     this.tasks.push(fresh);
     this.changed();
     this.pump();
@@ -280,6 +322,37 @@ export class TaskQueue {
     return this.tasks.filter((t) => t.status === 'running').length;
   }
 
+  private busySwarm(swarmId: string): number {
+    return this.tasks.filter((t) => t.swarmId === swarmId && t.status === 'running').length;
+  }
+
+  private dependencyState(task: QueueTask): { ready: boolean; failed?: string } {
+    const dependencies = task.swarmDependsOn ?? [];
+    for (const id of dependencies) {
+      const dependency = this.tasks.find((candidate) => candidate.id === id);
+      if (!dependency) return { ready: false };
+      if (dependency.status === 'done' && dependency.outcome !== 'done') return { ready: false, failed: `Blocked by unsuccessful dependency ${dependency.title}` };
+      if (dependency.status !== 'done') return { ready: false };
+    }
+    return { ready: true };
+  }
+
+  private blockDependents(failedIds: Set<string>, reason: string) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const task of this.tasks) {
+        if (task.status !== 'queued' || !(task.swarmDependsOn ?? []).some((id) => failedIds.has(id))) continue;
+        task.status = 'done';
+        task.outcome = 'blocked';
+        task.error = reason;
+        task.finishedAt = Date.now();
+        failedIds.add(task.id);
+        changed = true;
+      }
+    }
+  }
+
   /** A free desk (in the back office too, as far as it's built), else a free bean bag. */
   private freeDesk(): string | undefined {
     return nextFreeSeat((id) => this.workers.deskOccupied(id), this.workers.wing?.() ?? 0)?.id;
@@ -316,7 +389,19 @@ export class TaskQueue {
     let changed = false;
     for (const t of this.tasks) {
       if (t.status !== 'queued') continue;
+      const dependency = this.dependencyState(t);
+      if (dependency.failed) {
+        t.status = 'done';
+        t.outcome = 'blocked';
+        t.error = dependency.failed;
+        t.finishedAt = Date.now();
+        changed = true;
+        this.events.toast(`📋 ${label(t)} was blocked: ${dependency.failed}`, 'warn');
+        continue;
+      }
+      if (!dependency.ready) continue;
       if (this.busy() >= this.maxWorkers) break;
+      if (t.swarmId && t.swarmLimit !== undefined && this.busySwarm(t.swarmId) >= t.swarmLimit) continue;
       // A spent budget holds the queue instead of failing every task; the pump seats them once hiring resumes.
       if (this.events.hiringPaused()) break;
       // So does an office at its worker limit (--max-workers), unless one of the queue's own finished
@@ -386,6 +471,15 @@ export class TaskQueue {
         const provider = isAgentProvider(s.provider) ? s.provider : this.workers.defaultProvider;
         const t: QueueTask = {
           id: s.id,
+          swarmId: typeof s.swarmId === 'string' ? s.swarmId : undefined,
+          swarmLimit: typeof s.swarmLimit === 'number' && Number.isInteger(s.swarmLimit) && s.swarmLimit > 0 ? s.swarmLimit : undefined,
+          swarmDependsOn: Array.isArray(s.swarmDependsOn) ? s.swarmDependsOn.filter((id): id is string => typeof id === 'string').slice(0, 12) : undefined,
+          swarmAcceptanceCriteria: Array.isArray(s.swarmAcceptanceCriteria) ? s.swarmAcceptanceCriteria.filter((item): item is string => typeof item === 'string').slice(0, 8) : undefined,
+          swarmContextInclude: Array.isArray(s.swarmContextInclude) ? s.swarmContextInclude.filter((item): item is string => typeof item === 'string').slice(0, 24) : undefined,
+          swarmContextExclude: Array.isArray(s.swarmContextExclude) ? s.swarmContextExclude.filter((item): item is string => typeof item === 'string').slice(0, 24) : undefined,
+          swarmContextManifest: restoreContextManifest(s.swarmContextManifest),
+          swarmRole: ['frontend', 'backend', 'testing', 'security', 'documentation', 'general'].includes(String(s.swarmRole)) ? s.swarmRole : undefined,
+          swarmRouteReason: typeof s.swarmRouteReason === 'string' ? s.swarmRouteReason.slice(0, 200) : undefined,
           provider,
           model: provider === 'opencode' && isValidOpenCodeModel(s.model) ? s.model : provider === 'claude' && isClaudeModel(s.model) ? s.model : provider === 'grok' && isValidGrokModel(s.model) ? s.model : provider === 'muse' && isValidMuseModel(s.model) ? s.model : provider === 'dsh' && isValidDshModel(s.model) ? s.model : undefined,
           effort: (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'dsh') && isAgentEffort(s.effort) ? s.effort : undefined,

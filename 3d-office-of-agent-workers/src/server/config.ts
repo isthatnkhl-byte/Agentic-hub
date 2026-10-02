@@ -25,9 +25,13 @@ export interface Config {
   /** Plaintext password, only when known: from --password, or generated and not yet claimed. */
   password?: string;
   passwordGenerated: boolean;
+  /** Whether room-code joins must provide a shared office password. */
+  officePasswordCustom: boolean;
   /** scrypt(password, salt): what logins are checked against and sessions are keyed on. */
   verifier: Buffer;
   salt: Buffer;
+  /** Save a custom shared password without keeping its plaintext. */
+  setOfficePassword(password: string): void;
   secret: string;
   /** One-time token that lets the first visitor see the generated password (then never again). */
   claimToken?: string;
@@ -360,7 +364,7 @@ export function loadConfig(argv: string[]): Config {
   if (project) excludeFromGit(dir);
 
   const cfgPath = path.join(dataDir, 'config.json');
-  let stored: { password?: string; verifier?: string; salt?: string; secret?: string; claimedAt?: number; roomCode?: string } = {};
+  let stored: { password?: string; verifier?: string; salt?: string; officePassword?: { verifier?: string; salt?: string }; secret?: string; claimedAt?: number; roomCode?: string } = {};
   try {
     stored = JSON.parse(readFileSync(cfgPath, 'utf8'));
   } catch {
@@ -374,12 +378,13 @@ export function loadConfig(argv: string[]): Config {
   }
   if (!stored.secret) stored.secret = randomBytes(32).toString('hex');
   if (!stored.salt) stored.salt = randomBytes(16).toString('hex');
-  const salt = Buffer.from(stored.salt, 'hex');
+  let salt = Buffer.from(stored.salt, 'hex');
   const hash = (pw: string) => scryptSync(pw, salt, 32);
 
   if (resetPassword) {
     delete stored.password;
     delete stored.verifier;
+    delete stored.officePassword;
     delete stored.claimedAt;
     save();
     console.log('agent-office: password forgotten — a new one is generated on the next start');
@@ -388,8 +393,16 @@ export function loadConfig(argv: string[]): Config {
 
   let verifier: Buffer;
   let passwordGenerated = false;
-  if (password) {
+  let officePasswordCustom = false;
+  const savedOfficePassword = stored.officePassword;
+  if (savedOfficePassword && /^[a-f0-9]{64}$/i.test(savedOfficePassword.verifier ?? '') && /^[a-f0-9]{32}$/i.test(savedOfficePassword.salt ?? '')) {
+    salt = Buffer.from(savedOfficePassword.salt!, 'hex');
+    verifier = Buffer.from(savedOfficePassword.verifier!, 'hex');
+    password = '';
+    officePasswordCustom = true;
+  } else if (password) {
     verifier = hash(password);
+    officePasswordCustom = true;
   } else {
     passwordGenerated = true;
     if (stored.verifier) {
@@ -429,6 +442,7 @@ export function loadConfig(argv: string[]): Config {
     open,
     password: password || undefined,
     passwordGenerated,
+    officePasswordCustom,
     verifier,
     salt,
     secret: stored.secret,
@@ -440,6 +454,33 @@ export function loadConfig(argv: string[]): Config {
       save();
       this.claimed = true;
       this.password = undefined;
+    },
+    setOfficePassword(password: string) {
+      const nextSalt = randomBytes(16);
+      const nextVerifier = scryptSync(password, nextSalt, 32);
+      const previous = stored.officePassword;
+      const previousPassword = stored.password;
+      const previousClaimedAt = stored.claimedAt;
+      stored.officePassword = { salt: nextSalt.toString('hex'), verifier: nextVerifier.toString('hex') };
+      delete stored.password;
+      stored.claimedAt = Date.now();
+      try {
+        save();
+      } catch (err) {
+        if (previous) stored.officePassword = previous;
+        else delete stored.officePassword;
+        if (previousPassword === undefined) delete stored.password;
+        else stored.password = previousPassword;
+        if (previousClaimedAt === undefined) delete stored.claimedAt;
+        else stored.claimedAt = previousClaimedAt;
+        throw err;
+      }
+      this.salt = nextSalt;
+      this.verifier = nextVerifier;
+      this.password = undefined;
+      this.passwordGenerated = false;
+      this.officePasswordCustom = true;
+      this.claimed = true;
     },
     agentCmd,
     agentArgs,

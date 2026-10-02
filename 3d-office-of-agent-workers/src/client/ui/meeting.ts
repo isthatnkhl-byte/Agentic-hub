@@ -88,21 +88,40 @@ function renderStatus(m: Meeting, body: HTMLElement, foot: HTMLElement, net: Net
         h('span.dot', { style: `background:${w?.color ?? '#adb5bd'}` }),
         h('b', {}, s.role),
         h('span.muted', {}, `${i === 0 ? 'head of the table · ' : ''}${s.workerName ?? '…'}`),
-        w ? h('span.pill', { class: w.status }, STATUS_LABEL[w.status]) : h('span.pill.exited', {}, 'gone home'),
+        w ? h('span.pill', { class: w.status }, STATUS_LABEL[w.status]) : m.pattern === 'swarm' && m.swarmTasks ? h('span.pill.done', {}, 'plan routed') : h('span.pill.exited', {}, 'gone home'),
         part ? h('span.meeting-part', { title: t?.file ?? '' }, part) : null,
         s.tokens ? h('span.muted', {}, `${fmtTokens(s.tokens)} tokens`) : null,
         w ? h('button.btn.small', { type: 'button', onclick: () => actions.openTerminal(w.id) }, '🖥️ Terminal') : null,
       );
     }),
   );
+  const swarmTasks = m.swarmTasks?.length
+    ? h('ul.meeting-swarm-tasks', {}, ...m.swarmTasks.map((task) => h(
+        'li',
+        {},
+        h('b', {}, task.agentName),
+        h('span.pill', { class: task.status === 'running' ? 'working' : task.status === 'done' ? 'done' : task.status === 'queued' ? '' : 'needs_input' }, task.status === 'done' ? 'complete' : task.status),
+        h('span.muted', {}, `${task.role} · ${task.provider}${task.model ? ` · ${task.model}` : ''}`),
+        task.workerName ? h('span.muted', {}, task.workerName) : null,
+        task.error ? h('span.bad', {}, task.error) : null,
+        h('details', {}, h('summary', {}, 'Work'), h('pre', {}, task.work)),
+        task.dependsOn.length ? h('div.muted.swarm-detail', {}, `After: ${task.dependsOn.join(', ')}`) : null,
+        task.acceptanceCriteria.length ? h('details', {}, h('summary', {}, `Acceptance criteria (${task.acceptanceCriteria.length})`), h('ul', {}, ...task.acceptanceCriteria.map((item) => h('li', {}, item)))) : null,
+        task.contextManifest?.files.length ? h('details', {}, h('summary', {}, `Context files (${task.contextManifest.files.length}) · ${task.contextManifest.baseCommit?.slice(0, 8) ?? 'unknown base'}`), h('ul', {}, ...task.contextManifest.files.map((file) => h('li', {}, h('code', {}, file.path), ` · ${file.reason}`)))) : null,
+      )))
+    : null;
+  const progress = m.pattern === 'swarm' && m.swarmTasks
+    ? `${m.swarmTasks.filter((task) => task.status === 'done').length} of ${m.swarmTasks.length} tasks succeeded · up to ${m.swarmLimit} at once`
+    : undefined;
   const where = m.worktree ? h('span', {}, '🌿 ', h('code', {}, m.worktree.branch), m.commit ? ` · committed ${m.commit}` : '') : null;
   const review = m.review?.url ? h('a', { href: m.review.url, target: '_blank', rel: 'noopener noreferrer' }, `🔍 The review on PR #${m.pr} ↗`) : m.review?.error ? h('span.bad', {}, `Couldn't post the review: ${m.review.error}`) : null;
   body.replaceChildren(
     ...present(
     h('div.meeting-head', {}, pill, h('b', {}, `${p.icon} ${p.label}`), h('span.meeting-title', { title: m.prompt }, m.title)),
-    h('p.meeting-line', {}, running ? `${meetingStage(m)} · called by ${m.calledBy} ${timeAgo(new Date(m.startedAt).toISOString())}` : m.status === 'done' ? `✅ Wrote ${m.output} in ${m.round} round${m.round === 1 ? '' : 's'}` : `⛔ Stopped in round ${m.round}: ${m.reason ?? 'stopped'}`),
+    h('p.meeting-line', {}, running ? `${progress ?? `${meetingStage(m)} · called by ${m.calledBy} ${timeAgo(new Date(m.startedAt).toISOString())}`}` : m.status === 'done' ? m.pattern === 'swarm' ? `✅ All ${m.swarmTasks?.length ?? 0} tasks finished` : `✅ Wrote ${m.output} in ${m.round} round${m.round === 1 ? '' : 's'}` : m.status === 'partial' ? `⚠️ Partial result: ${m.reason ?? 'some tasks did not finish'}` : `⛔ Stopped in round ${m.round}: ${m.reason ?? 'stopped'}`),
     h('div.meeting-budget', { title: `${m.tokens.toLocaleString()} of ${m.budget.toLocaleString()} tokens` }, h('div.meeting-bar', {}, h('i', { style: `width:${(f * 100).toFixed(1)}%;background:${f > 0.9 ? 'var(--bad)' : f > 0.7 ? 'var(--warn)' : 'var(--good)'}` })), h('span', {}, `${meetingSpend(m)} of ${fmtTokens(m.budget)} tokens`)),
     seats,
+    swarmTasks,
     h('div.meeting-out', {}, h('div.meeting-out-head', {}, h('b', {}, '📄 '), h('code', {}, m.output), where, review), h('pre.meeting-preview', {}, m.preview?.trim() ? m.preview : running ? 'Nothing written yet.' : 'Nothing was written.')),
     store.meeting.past.length
       ? h('details.meeting-past', {}, h('summary', {}, `Earlier meetings (${store.meeting.past.length})`), h('ul', {}, ...store.meeting.past.map((r) => h('li', { title: `Called by ${r.calledBy}` }, h('b', {}, r.title), h('div.muted', {}, r.summary)))))
@@ -112,7 +131,7 @@ function renderStatus(m: Meeting, body: HTMLElement, foot: HTMLElement, net: Net
   const head = m.seats[0]?.workerId ? store.workers.get(m.seats[0].workerId) : undefined;
   foot.replaceChildren(
     ...present(
-    h('span.grow', {}, running ? 'The workers stay at the table after it ends, so you can read their terminals.' : 'Clearing the room sends the workers home. A committed output stays on its branch.'),
+    h('span.grow', {}, running ? m.pattern === 'swarm' ? 'The planner leaves after routing tasks. Stop the swarm here; its workers run through the task queue.' : 'The workers stay at the table after it ends, so you can read their terminals.' : 'Clearing the room sends the workers home. A committed output stays on its branch.'),
     running ? h('button.btn', { type: 'button', onclick: () => confirmDialog('Stop the meeting?', `The workers stop where they are and stay at the table. ${m.output} is only there if it was written.`, 'Stop it', () => net.send({ t: 'meeting.stop' })) }, '⛔ Stop meeting') : null,
     !running && m.commit && head?.worktree ? h('button.btn', { type: 'button', title: `Push ${m.worktree?.branch} and open a pull request`, onclick: () => actions.openPr(head.id) }, head.pr ? `🔀 PR #${head.pr.number}` : '🔀 Open PR') : null,
     !running ? h('button.btn', { type: 'button', onclick: () => net.send({ t: 'meeting.clear' }) }, '🧹 Clear the room') : null,
@@ -132,6 +151,7 @@ function meetingForm(net: Net, preset: MeetingPreset | undefined, done: () => vo
   const patterns = h('div.meeting-patterns', { role: 'radiogroup', 'aria-label': 'Pattern' });
   const about = h('textarea', { rows: 4, placeholder: 'The question to settle, or the task to do: e.g. “Should the dog use A* or a navmesh?”', 'aria-label': 'What the meeting is about' }) as HTMLTextAreaElement;
   about.value = preset?.prompt ?? '';
+  const aboutLabel = h('label', {}, 'What’s it about?');
   const titleIn = h('input', { type: 'text', placeholder: 'Title (optional): the first line otherwise', maxlength: 100, 'aria-label': 'Title' }) as HTMLInputElement;
   titleIn.value = preset?.title ?? '';
   const outputIn = h('input', { type: 'text', 'aria-label': 'Output file', spellcheck: 'false' }) as HTMLInputElement;
@@ -147,6 +167,11 @@ function meetingForm(net: Net, preset: MeetingPreset | undefined, done: () => vo
   const roundsIn = h('input', { type: 'number', 'aria-label': 'Rounds' }) as HTMLInputElement;
   const roundsNote = h('small.muted');
   const budgetIn = h('input', { type: 'number', min: 50, step: 250, 'aria-label': 'Token budget in thousands' }) as HTMLInputElement;
+  const swarmLimitIn = h('input', { type: 'number', min: 1, max: 20, step: 1, 'aria-label': 'Maximum swarm workers at once' }) as HTMLInputElement;
+  swarmLimitIn.value = String(Math.max(1, Math.min(20, store.queue.maxWorkers || 3)));
+  const swarmLimitRow = h('div.meeting-field', {}, h('label', {}, 'Maximum workers at once'), swarmLimitIn, h('small.muted', {}, 'Further capped by the queue limit and the office-wide worker limit.'));
+  const roleRow = h('div.meeting-field', {}, h('label.meeting-count', {}, 'Workers at the table', minus, count, plus), roleList);
+  const boundsRow = h('div.meeting-bounds', {}, h('div.meeting-field', {}, h('label', {}, 'Round limit'), roundsIn, roundsNote), h('div.meeting-field', {}, h('label', {}, 'Token budget (thousands)'), budgetIn, h('small.muted', {}, 'For everyone at the table together. Over it, the meeting stops.')));
   const provider = providerPicker(store.project, 'meeting-provider', 'Workers');
   const busy = h('p.meeting-busy');
   const submit = h('button.btn.primary', { type: 'submit' }, '🤝 Start the meeting');
@@ -156,9 +181,10 @@ function meetingForm(net: Net, preset: MeetingPreset | undefined, done: () => vo
   const slug = () => slugify(titleIn.value.trim() || about.value.trim().split('\n')[0] || 'meeting', 32);
   const pr = () => Number(prSel.value) || undefined;
   const syncOutput = () => {
-    if (!outputTouched) outputIn.value = def().output(slug(), pr());
+    if (pattern === 'swarm') outputIn.value = 'plan.json';
+    else if (!outputTouched) outputIn.value = def().output(slug(), pr());
     const problem = outputProblem(outputIn.value.trim());
-    outputNote.textContent = problem ? `⚠️ ${problem}` : pattern === 'review' ? 'It ends when this file is written; the office then posts it on the PR as one review.' : store.project?.branch ? 'It ends when this file is written; the office commits it on the meeting’s own branch.' : 'It ends when this file is written.';
+    outputNote.textContent = problem ? `⚠️ ${problem}` : pattern === 'swarm' ? 'The planner writes this JSON before any task workers start.' : pattern === 'review' ? 'It ends when this file is written; the office then posts it on the PR as one review.' : store.project?.branch ? 'It ends when this file is written; the office commits it on the meeting’s own branch.' : 'It ends when this file is written.';
     outputNote.classList.toggle('bad', !!problem);
   };
   const syncBudget = () => {
@@ -191,6 +217,15 @@ function meetingForm(net: Net, preset: MeetingPreset | undefined, done: () => vo
     roundsNote.textContent = d.roundsNote;
     prRow.classList.toggle('hidden', d.needs !== 'pr');
     partsRow.classList.toggle('hidden', d.needs !== 'parts');
+    roleRow.classList.toggle('hidden', p === 'swarm');
+    boundsRow.classList.toggle('hidden', p === 'swarm');
+    swarmLimitRow.classList.toggle('hidden', p !== 'swarm');
+    aboutLabel.textContent = p === 'swarm' ? 'Master prompt' : 'What’s it about?';
+    about.placeholder = p === 'swarm' ? 'Describe the project outcome. The planner will split it into independent specialist tasks.' : 'The question to settle, or the task to do: e.g. “Should the dog use A* or a navmesh?”';
+    about.setAttribute('aria-label', p === 'swarm' ? 'Master prompt' : 'What the meeting is about');
+    outputIn.readOnly = p === 'swarm';
+    outputTouched = p === 'swarm' ? false : outputTouched;
+    submit.textContent = p === 'swarm' ? '🐝 Plan and start swarm' : '🤝 Start the meeting';
     renderRoles();
     syncOutput();
   };
@@ -219,13 +254,14 @@ function meetingForm(net: Net, preset: MeetingPreset | undefined, done: () => vo
     'form.meeting-form',
     {},
     patterns,
-    h('div.meeting-field', {}, h('label', {}, 'What’s it about?'), about),
+    h('div.meeting-field', {}, aboutLabel, about),
     h('div.meeting-field', {}, titleIn),
     prRow,
     partsRow,
     h('div.meeting-field', {}, h('label', {}, 'Output file'), outputIn, outputNote),
-    h('div.meeting-field', {}, h('label.meeting-count', {}, 'Workers at the table', minus, count, plus), roleList),
-    h('div.meeting-bounds', {}, h('div.meeting-field', {}, h('label', {}, 'Round limit'), roundsIn, roundsNote), h('div.meeting-field', {}, h('label', {}, 'Token budget (thousands)'), budgetIn, h('small.muted', {}, 'For everyone at the table together. Over it, the meeting stops.'))),
+    roleRow,
+    boundsRow,
+    swarmLimitRow,
     provider.element,
     busy,
   ) as HTMLFormElement;
@@ -240,6 +276,10 @@ function meetingForm(net: Net, preset: MeetingPreset | undefined, done: () => vo
     if (def().needs === 'parts' && parts.length < roles.length - 1) {
       toast(`List at least ${roles.length - 1} parts, one per line, or seat fewer workers`, 'warn');
       return partsIn.focus();
+    }
+    if (pattern === 'swarm' && (!Number.isInteger(Number(swarmLimitIn.value)) || Number(swarmLimitIn.value) < 1 || Number(swarmLimitIn.value) > 20)) {
+      toast('Choose a swarm limit from 1 to 20 workers', 'warn');
+      return swarmLimitIn.focus();
     }
     const output = outputIn.value.trim();
     if (outputProblem(output)) return outputIn.focus();
@@ -259,6 +299,7 @@ function meetingForm(net: Net, preset: MeetingPreset | undefined, done: () => vo
       provider: provider.value(),
       model: provider.model(),
       effort: provider.effort(),
+      swarmLimit: pattern === 'swarm' ? Number(swarmLimitIn.value) : undefined,
     });
     toast(`🤝 Calling the ${def().label} meeting: the workers are heading for the meeting room`);
     done();

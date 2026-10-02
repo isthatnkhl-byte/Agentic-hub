@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { loadConfig } from '../src/server/config.js';
+import { Accounts } from '../src/server/accounts.js';
+import { Auth } from '../src/server/auth.js';
 
 /** loadConfig with a throwaway --home, turning process.exit into a throw so a bad flag can be tested. */
 function load(t: { after(fn: () => void): void }, ...argv: string[]) {
@@ -49,4 +51,29 @@ test('the office listens on loopback unless --host says otherwise', (t) => {
 test('--no-open leaves the browser alone', (t) => {
   assert.equal(load(t).open, true);
   assert.equal(load(t, '--no-open').open, false);
+});
+
+test('a custom office password persists across restarts and invalidates old shared sessions', async (t) => {
+  const home = mkdtempSync(path.join(tmpdir(), 'agent-office-password-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const first = loadConfig(['--home', home]);
+  const auth = new Auth(first.verifier, first.salt, first.secret, new Accounts(first.dataDir));
+  const oldSession = auth.issue();
+  const generatedPassword = first.password;
+
+  first.setOfficePassword('custom-office-password');
+  const savedConfig = readFileSync(path.join(first.dataDir, 'config.json'), 'utf8');
+  auth.setPassword(first.verifier, first.salt);
+  assert.equal(first.officePasswordCustom, true);
+  assert.ok(generatedPassword);
+  assert.equal(savedConfig.includes(generatedPassword!), false);
+  assert.equal(savedConfig.includes('custom-office-password'), false);
+  assert.equal(await auth.checkPassword('custom-office-password'), true);
+  assert.equal(auth.verify(oldSession), undefined);
+
+  const restarted = loadConfig(['--home', home, '--password', 'dev-default']);
+  const restartedAuth = new Auth(restarted.verifier, restarted.salt, restarted.secret, new Accounts(restarted.dataDir));
+  assert.equal(restarted.officePasswordCustom, true);
+  assert.equal(await restartedAuth.checkPassword('custom-office-password'), true);
+  assert.equal(await restartedAuth.checkPassword('dev-default'), false);
 });

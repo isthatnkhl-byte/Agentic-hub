@@ -58,6 +58,134 @@ test('queue seats the selected provider and preserves it through completion and 
   assert.equal(f.workers[1].provider, 'opencode');
 });
 
+test('swarm tasks respect their own concurrency cap while unrelated tasks use spare queue slots', (t) => {
+  const f = fixture(); t.after(() => f.close());
+  const q = f.open();
+  q.setLimit(4);
+  for (let i = 1; i <= 3; i++) {
+    assert.equal(q.add(`Swarm task ${i}`, 'Swarm', `Agent ${i}`, undefined, undefined, undefined, undefined, undefined, undefined, {
+      taskId: `swarm-task-${i}`, swarmId: 'swarm-1', limit: 2, dependsOn: [],
+    }), undefined);
+  }
+  assert.equal(f.workers.length, 2);
+  assert.equal(q.state().tasks[2].status, 'queued');
+  assert.equal(q.state().tasks[0].swarmId, 'swarm-1');
+  assert.equal(q.state().tasks[0].swarmLimit, 2);
+
+  assert.equal(q.add('Unrelated task', 'Tester'), undefined);
+  assert.equal(f.workers.length, 3);
+  f.workers[0].status = 'done'; q.onWorker(f.workers[0]);
+  assert.equal(f.workers.length, 4);
+  assert.equal(q.state().tasks[2].status, 'running');
+});
+
+test('cancelling a swarm removes its queued work and stops its active worker', (t) => {
+  const f = fixture(); t.after(() => f.close());
+  const q = f.open();
+  q.setLimit(1);
+  for (let i = 1; i <= 2; i++) {
+    assert.equal(q.add(`Swarm task ${i}`, 'Swarm', `Agent ${i}`, undefined, undefined, undefined, undefined, undefined, undefined, {
+      taskId: `cancel-task-${i}`, swarmId: 'cancel-swarm', limit: 1, dependsOn: [],
+    }), undefined);
+  }
+  assert.equal(f.workers.length, 1);
+  q.cancelSwarm('cancel-swarm');
+  q.pump();
+  assert.equal(f.workers.length, 0);
+  assert.equal(q.state().tasks.length, 1);
+  assert.equal(q.state().tasks[0].outcome, 'killed');
+});
+
+test('swarm route and context metadata survive queue restart and retry', (t) => {
+  const f = fixture(); t.after(() => f.close());
+  const q = f.open();
+  q.setLimit(0);
+  assert.equal(q.add('Run the API task', 'Swarm', 'backend worker', undefined, 'opencode', 'openai/gpt-5', undefined, undefined, undefined, {
+    taskId: 'context-task', swarmId: 'context-swarm', limit: 2, dependsOn: [], acceptanceCriteria: ['Has tests.'],
+    contextInclude: ['src/server/'], contextExclude: [], contextManifest: { baseCommit: 'a'.repeat(40), files: [{ path: 'src/server/api.ts', reason: 'matches api task' }] },
+    role: 'backend', routeReason: 'plan route for backend',
+  }), undefined);
+  q.shutdown();
+
+  const restored = f.open();
+  assert.equal(restored.state().tasks[0].swarmRole, 'backend');
+  assert.equal(restored.state().tasks[0].swarmContextManifest?.baseCommit, 'a'.repeat(40));
+  assert.deepEqual(restored.state().tasks[0].swarmDependsOn, []);
+  restored.setLimit(1);
+  assert.equal(f.workers[0].provider, 'opencode');
+  assert.match(restored.state().tasks[0].prompt, /API task/);
+  f.workers[0].status = 'done'; restored.onWorker(f.workers[0]);
+  restored.retry('context-task');
+  assert.equal(restored.state().tasks[0].swarmContextManifest?.files[0].path, 'src/server/api.ts');
+});
+
+test('swarm dependency tasks wait for success and fan-in only after every prerequisite completes', (t) => {
+  const f = fixture(); t.after(() => f.close());
+  const q = f.open();
+  q.setLimit(3);
+  const swarm = { swarmId: 'dag-swarm', limit: 3 };
+  assert.equal(q.add('Combine API and UI', 'Swarm', 'integrator', undefined, undefined, undefined, undefined, undefined, undefined, {
+    ...swarm, taskId: 'dag-integrator', dependsOn: ['dag-api', 'dag-ui'],
+  }), undefined);
+  assert.equal(f.workers.length, 0, 'missing planned prerequisites must not start the dependent task');
+  assert.equal(q.add('Implement API', 'Swarm', 'backend worker', undefined, undefined, undefined, undefined, undefined, undefined, {
+    ...swarm, taskId: 'dag-api', dependsOn: [],
+  }), undefined);
+  assert.equal(q.add('Implement UI', 'Swarm', 'frontend worker', undefined, undefined, undefined, undefined, undefined, undefined, {
+    ...swarm, taskId: 'dag-ui', dependsOn: [],
+  }), undefined);
+  assert.equal(f.workers.length, 2);
+  f.workers[0].status = 'done'; q.onWorker(f.workers[0]);
+  assert.equal(f.workers.length, 2, 'the integration task still waits for the other prerequisite');
+  f.workers[1].status = 'done'; q.onWorker(f.workers[1]);
+  assert.equal(f.workers.length, 3);
+  assert.equal(f.workers[2].prompt, 'Combine API and UI');
+});
+
+test('failed swarm prerequisites block dependent tasks without starting them', (t) => {
+  const f = fixture(); t.after(() => f.close());
+  const q = f.open();
+  q.setLimit(2);
+  assert.equal(q.add('Run integration', 'Swarm', 'integration', undefined, undefined, undefined, undefined, undefined, undefined, {
+    taskId: 'blocked-integration', swarmId: 'blocked-swarm', limit: 2, dependsOn: ['blocked-api'],
+  }), undefined);
+  assert.equal(q.add('Build API', 'Swarm', 'api', undefined, undefined, undefined, undefined, undefined, undefined, {
+    taskId: 'blocked-api', swarmId: 'blocked-swarm', limit: 2, dependsOn: [],
+  }), undefined);
+  f.workers[0].status = 'exited'; q.onWorker(f.workers[0]);
+  const dependent = q.state().tasks.find((task) => task.id === 'blocked-integration')!;
+  assert.equal(dependent.status, 'done');
+  assert.equal(dependent.outcome, 'blocked');
+  assert.match(dependent.error ?? '', /Blocked by unsuccessful dependency/);
+  assert.equal(f.workers.length, 1);
+});
+
+test('removing a queued swarm prerequisite blocks its dependent tasks', (t) => {
+  const f = fixture(); t.after(() => f.close());
+  const q = f.open();
+  q.setLimit(0);
+  assert.equal(q.add('Build API', 'Swarm', 'api', undefined, undefined, undefined, undefined, undefined, undefined, {
+    taskId: 'remove-api', swarmId: 'remove-swarm', limit: 2, dependsOn: [],
+  }), undefined);
+  assert.equal(q.add('Run integration', 'Swarm', 'integration', undefined, undefined, undefined, undefined, undefined, undefined, {
+    taskId: 'remove-integration', swarmId: 'remove-swarm', limit: 2, dependsOn: ['remove-api'],
+  }), undefined);
+  assert.equal(q.remove('remove-api'), undefined);
+  const dependent = q.state().tasks.find((task) => task.id === 'remove-integration')!;
+  assert.equal(dependent.status, 'done');
+  assert.equal(dependent.outcome, 'blocked');
+});
+
+test('adding the same stable swarm task id after restart reconciliation is idempotent', (t) => {
+  const f = fixture(); t.after(() => f.close());
+  const q = f.open();
+  const swarm = { taskId: 'stable-task', swarmId: 'stable-run', limit: 2, dependsOn: [] };
+  assert.equal(q.add('Work once', 'Swarm', 'agent', undefined, undefined, undefined, undefined, undefined, undefined, swarm), undefined);
+  assert.equal(q.add('Work once', 'Swarm', 'agent', undefined, undefined, undefined, undefined, undefined, undefined, swarm), undefined);
+  assert.equal(q.state().tasks.length, 1);
+  assert.equal(f.workers.length, 1);
+});
+
 test('queued provider survives restart even when the configured default differs', (t) => {
   const f = fixture(); t.after(() => f.close());
   const q = f.open(); q.setLimit(0);

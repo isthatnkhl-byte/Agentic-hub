@@ -16,6 +16,7 @@ const submitBtn = $<HTMLButtonElement>('submit');
 const errorEl = $('error');
 let checkedCode = '';
 let joinKind: 'room' | 'account' | undefined;
+let officePasswordRequired = false;
 
 if (codeOrToken) {
   codeInput.value = codeOrToken;
@@ -48,6 +49,7 @@ async function checkCode(val: string): Promise<boolean> {
     }
     const { name: invited, role, by, project, roomCode } = r.body;
     joinKind = roomCode ? 'room' : 'account';
+    officePasswordRequired = !!roomCode && r.body.officePasswordRequired === true;
     checkedCode = val;
     $('title').textContent = roomCode ? `Join ${project} (${roomCode})` : `Join the ${project} office`;
     $('sub').textContent = roomCode
@@ -59,12 +61,15 @@ async function checkCode(val: string): Promise<boolean> {
     } else {
       nameInput.readOnly = false;
     }
-    passwordInput.required = !roomCode;
-    passwordLabel.textContent = roomCode ? 'Account password (optional)' : 'Create account password';
-    passwordInput.placeholder = roomCode ? 'Leave blank for guest access' : 'At least 8 characters';
+    passwordInput.required = !roomCode || officePasswordRequired;
+    passwordInput.autocomplete = roomCode && officePasswordRequired ? 'current-password' : 'new-password';
+    passwordLabel.textContent = roomCode ? officePasswordRequired ? 'Office password' : 'Account password (optional)' : 'Create account password';
+    passwordInput.placeholder = roomCode ? officePasswordRequired ? 'Enter the office password' : 'Leave blank for guest access' : 'At least 8 characters';
     passwordNote.hidden = false;
     passwordNote.textContent = roomCode
-      ? 'Leave blank to join as a guest. Choose a password to create an account you can sign into later.'
+      ? officePasswordRequired
+        ? 'Enter the office password the owner shared with you. Use your name; people with an account should sign in with their own password.'
+        : 'Leave blank to join as a guest. Choose a password to create an account you can sign into later.'
       : 'This invite creates an account. Choose a password of at least 8 characters.';
     (invited ? passwordInput : nameInput).focus();
     return true;
@@ -78,6 +83,7 @@ codeInput.addEventListener('input', () => {
   if (codeInput.value.trim() === checkedCode) return;
   checkedCode = '';
   joinKind = undefined;
+  officePasswordRequired = false;
   passwordInput.required = false;
   passwordNote.hidden = true;
   nameInput.readOnly = false;
@@ -115,7 +121,7 @@ form.addEventListener('submit', async (e) => {
     passwordInput.focus();
     return;
   }
-  if (currentPass && currentPass.length < 8) {
+  if (currentPass && currentPass.length < 8 && !officePasswordRequired) {
     errorEl.textContent = 'Use at least 8 characters, or leave the password blank for guest access';
     passwordInput.focus();
     return;

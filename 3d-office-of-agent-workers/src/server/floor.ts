@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { ChangesState, FloorInfo, PeerInfo, ProjectInfo, ServerMsg, WorkerInfo } from '../shared/protocol.js';
+import { SWARM_ROLE_PROFILES } from '../shared/meetings.js';
 import { isBusy } from '../shared/status.js';
 import { DESK_BY_ID } from '../shared/layout.js';
 import type { FloorDef } from './building.js';
@@ -218,6 +219,7 @@ export class Floor {
     this.queue = new TaskQueue(dataDir, this.workers, !!this.project.branch, {
       update: (state) => {
         ctx.emit(this, { t: 'queue', state });
+        this.meetings?.pump();
         // A task's pull request may just have been linked (or merged).
         this.sendLandedHome();
       },
@@ -247,10 +249,32 @@ export class Floor {
           return workers.officeDefault;
         },
         list: () => this.workers.list(),
+        availableProviders: () => this.project.agentProviders,
         seat: (deskId, by, prompt, provider, model, effort, meeting, owner, createdById) => this.workers.spawn(deskId, by, prompt, false, 'agent', provider, model, effort, meeting, owner, [], undefined, createdById),
         prompt: (id, text, by) => this.workers.prompt(id, text, by),
         write: (id, data, by) => this.workers.write(id, data, by),
         kill: (id) => this.workers.kill(id),
+        queueSwarm: (task, options) => this.queue.add([
+          `Specialist profile: ${SWARM_ROLE_PROFILES[task.role].label}. ${SWARM_ROLE_PROFILES[task.role].guidance}`,
+          task.work,
+          task.acceptanceCriteria.length ? `Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}` : '',
+          task.context.include.length ? `Inspect these relevant project paths first (inside your own worktree):\n${task.context.include.map((item) => `- ${item}`).join('\n')}` : '',
+          task.context.exclude.length ? `Do not use these unrelated paths as task scope:\n${task.context.exclude.map((item) => `- ${item}`).join('\n')}` : '',
+          task.contextManifest?.files.length ? `Relevant repository context from base commit ${task.contextManifest.baseCommit ?? 'unknown'}; verify these paths exist in your worktree before relying on them:\n${task.contextManifest.files.map((item) => `- ${item.path} — ${item.reason}`).join('\n')}` : '',
+        ].filter(Boolean).join('\n\n'), options.by, task.agentName, undefined, task.provider, task.model, task.effort, options.owner, options.createdById, {
+          taskId: task.id,
+          swarmId: options.swarmId,
+          limit: options.maxParallel,
+          dependsOn: task.dependsOn.map((dependency) => `${options.swarmId}-${dependency}`),
+          acceptanceCriteria: task.acceptanceCriteria,
+          contextInclude: task.context.include,
+          contextExclude: task.context.exclude,
+          contextManifest: task.contextManifest,
+          role: task.role,
+          routeReason: task.routeReason,
+        }),
+        queueState: () => this.queue.state(),
+        cancelSwarm: (swarmId) => this.queue.cancelSwarm(swarmId),
       },
       this.project.branch ? new Worktrees(def.dir) : undefined,
       {

@@ -80,14 +80,14 @@ export class MeetingBoardTexture {
     }
     const p = MEETING_PATTERNS[m.pattern];
     // Across the top: the file, and where the meeting is.
-    g.fillStyle = m.status === 'stopped' ? '#ffd6e0' : m.status === 'done' ? '#caffbf' : '#e7f5ff';
+    g.fillStyle = m.status === 'stopped' ? '#ffd6e0' : m.status === 'partial' ? '#fff3bf' : m.status === 'done' ? '#caffbf' : '#e7f5ff';
     g.fillRect(0, 0, W, 70);
     g.fillStyle = INK;
     g.font = `800 36px ${MONO}`;
     g.fillText(`📄 ${m.output}`, 24, 48);
     g.font = `800 34px ${FONT}`;
     g.textAlign = 'right';
-    g.fillText(`${p.icon} ${p.label} · ${m.status === 'running' ? meetingStage(m) : m.status === 'done' ? '✅ done' : '⛔ stopped'}`, W - 24, 48);
+    g.fillText(`${p.icon} ${p.label} · ${m.status === 'running' ? meetingStage(m) : m.status === 'done' ? '✅ done' : m.status === 'partial' ? '⚠️ partial' : '⛔ stopped'}`, W - 24, 48);
     g.textAlign = 'left';
 
     const text = (m.preview ?? '').replace(/\r/g, '');
@@ -156,11 +156,11 @@ export class MeetingSignTexture {
       }
       return y;
     };
-    g.fillStyle = !m ? '#2b2d42' : m.status === 'running' ? '#1d3557' : m.status === 'done' ? '#1b4332' : '#6a040f';
+    g.fillStyle = !m ? '#2b2d42' : m.status === 'running' ? '#1d3557' : m.status === 'done' ? '#1b4332' : m.status === 'partial' ? '#6a4c00' : '#6a040f';
     g.fillRect(0, 0, W, H);
     g.textBaseline = 'alphabetic';
     // A strip across the top says whether the room is taken.
-    const [strip, label] = !m ? ['#06d6a0', '● FREE'] : m.status === 'running' ? ['#ffd166', '● IN A MEETING'] : m.status === 'done' ? ['#9ef01a', '✅ DONE'] : ['#ffb3c1', '⛔ STOPPED'];
+    const [strip, label] = !m ? ['#06d6a0', '● FREE'] : m.status === 'running' ? ['#ffd166', '● IN A MEETING'] : m.status === 'done' ? ['#9ef01a', '✅ DONE'] : m.status === 'partial' ? ['#ffd166', '⚠ PARTIAL'] : ['#ffb3c1', '⛔ STOPPED'];
     g.fillStyle = strip;
     g.fillRect(0, 0, W, 78);
     g.fillStyle = INK;

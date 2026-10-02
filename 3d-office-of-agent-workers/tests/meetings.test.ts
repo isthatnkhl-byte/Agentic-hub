@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MeetingRoom, type MeetingWorkers } from '../src/server/meetings.js';
 import { Worktrees } from '../src/server/worktrees.js';
-import type { AgentChoice, MeetingRequest, WorkerInfo } from '../src/shared/protocol.js';
+import type { AgentChoice, MeetingRequest, QueueTask, WorkerInfo } from '../src/shared/protocol.js';
 import { MEETING_PATTERN_IDS, isMeetingPattern } from '../src/shared/meetings.js';
 import { PROMPTS, type PromptId } from '../src/shared/prompts.js';
 
@@ -29,6 +29,7 @@ function fixture(opts: { git?: boolean; rewritten?: Partial<Record<PromptId, str
   const typed: { id: string; data: string }[] = [];
   const toasts: string[] = [];
   const reviews: { pr: number; file: string }[] = [];
+  const queuedTasks: QueueTask[] = [];
   let ids = 0;
   const manager: MeetingWorkers = {
     defaultProvider: 'claude',
@@ -58,8 +59,16 @@ function fixture(opts: { git?: boolean; rewritten?: Partial<Record<PromptId, str
       room.onWorkerGone(id);
       return {};
     },
+    queueSwarm(task, options) {
+      queuedTasks.push({ id: task.id, swarmId: options.swarmId, swarmLimit: options.maxParallel, swarmDependsOn: task.dependsOn.map((dependency) => `${options.swarmId}-${dependency}`), swarmAcceptanceCriteria: task.acceptanceCriteria, swarmContextInclude: task.context.include, swarmContextExclude: task.context.exclude, swarmContextManifest: task.contextManifest, swarmRole: task.role, swarmRouteReason: task.routeReason, provider: options.provider, model: task.model, effort: task.effort, title: task.agentName, prompt: task.work, addedBy: options.by, owner: options.owner, addedById: options.createdById, addedAt: Date.now(), status: 'queued' });
+      return undefined;
+    },
+    queueState: () => ({ tasks: queuedTasks, maxWorkers: 3 }),
+    cancelSwarm(swarmId) {
+      for (const task of queuedTasks.slice()) if (task.swarmId === swarmId && task.status === 'queued') queuedTasks.splice(queuedTasks.indexOf(task), 1);
+    },
   };
-  const room: MeetingRoom = new MeetingRoom(dir, dataDir, manager, opts.git ? new Worktrees(dir) : undefined, {
+  const openRoom = () => new MeetingRoom(dir, dataDir, manager, opts.git ? new Worktrees(dir) : undefined, {
     update() {},
     toast: (text) => toasts.push(text),
     hiringPaused: () => undefined,
@@ -69,6 +78,7 @@ function fixture(opts: { git?: boolean; rewritten?: Partial<Record<PromptId, str
     },
     prompt: (id) => opts.rewritten?.[id] ?? PROMPTS[id].text,
   });
+  let room = openRoom();
   const cwd = () => {
     const wt = room.state().current?.worktree;
     return wt ? path.join(dir, wt.path) : dir;
@@ -98,7 +108,7 @@ function fixture(opts: { git?: boolean; rewritten?: Partial<Record<PromptId, str
     }
   };
   const start = (req: Partial<MeetingRequest>) => room.start({ pattern: 'debate', prompt: 'Which cache should we use?', roles: [], ...req } as MeetingRequest, 'Ada');
-  return { dir, room, workers, prompts, typed, toasts, reviews, take, settle, start, cwd, kill: (id: string) => manager.kill(id), close() { room.shutdown(); rmSync(dir, { recursive: true, force: true }); } };
+  return { dir, get room() { return room; }, workers, prompts, typed, toasts, reviews, queuedTasks, take, settle, start, cwd, kill: (id: string) => manager.kill(id), restart() { room.shutdown(); room = openRoom(); return room; }, restore() { room = openRoom(); return room; }, close() { room.shutdown(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
 test('a debate runs its rounds and ends when the chair writes the decision', (t) => {
@@ -227,6 +237,178 @@ test('bad requests are turned away before anyone sits down', (t) => {
   assert.equal(f.workers.length, 0);
   assert.equal(f.start({}), undefined);
   assert.match(f.start({}) ?? '', /busy/);
+});
+
+test('swarm creates a validated plan first, then queues routed tasks under the requested cap', (t) => {
+  const f = fixture({ git: true }); t.after(() => f.close());
+  assert.equal(f.start({ pattern: 'swarm', prompt: 'Build an account settings page', swarmLimit: 2 }), undefined);
+  const meeting = f.room.state().current!;
+  assert.equal(meeting.output, 'plan.json');
+  assert.ok(meeting.worktree);
+  assert.equal(f.workers.length, 1);
+  assert.match(f.prompts[0].text, /"schemaVersion": 1/);
+  assert.match(f.prompts[0].text, /"agent-name": "frontend worker"/);
+  assert.match(f.prompts[0].text, /first model call/);
+
+  writeFileSync(path.join(f.cwd(), 'plan.json'), JSON.stringify({ tasks: [
+    { 'agent-name': 'frontend worker', work: "You're a professional frontend designer and auditor for demo. You're handed the following tasks: build the account settings page." },
+    { 'agent-name': 'test worker', work: 'Add focused tests for the account settings workflow.' },
+  ] }));
+  const planner = f.workers[0];
+  planner.status = 'working'; f.room.onWorker(planner);
+  planner.status = 'done'; f.room.onWorker(planner);
+
+  assert.equal(f.workers.length, 0, 'the planner leaves the table after routing the plan');
+  assert.equal(f.queuedTasks.length, 2, `meeting: ${JSON.stringify(f.room.state().current)}`);
+  assert.deepEqual(f.queuedTasks.map((task) => [task.title, task.status, task.swarmId, task.swarmLimit]), [
+    ['frontend worker', 'queued', meeting.id, 2],
+    ['test worker', 'queued', meeting.id, 2],
+  ]);
+  assert.match(f.queuedTasks[0].prompt, /professional frontend designer and auditor/);
+  assert.equal(f.queuedTasks[0].swarmRole, 'frontend');
+  assert.ok(f.queuedTasks[0].swarmContextManifest?.baseCommit);
+  assert.ok(f.queuedTasks[0].swarmContextManifest?.files.some((file) => file.path === 'README.md'));
+  assert.equal(f.room.state().current!.status, 'running');
+  assert.equal(existsSync(path.join(f.dir, 'plan.json')), false);
+  assert.ok(existsSync(path.join(f.dir, '.agent-office', 'meetings', meeting.id, 'plan.json')));
+
+  f.queuedTasks[0].status = 'done'; f.queuedTasks[0].outcome = 'done'; f.room.pump();
+  assert.equal(f.room.state().current!.status, 'running');
+  f.queuedTasks[1].status = 'done'; f.queuedTasks[1].outcome = 'done'; f.room.pump();
+  assert.equal(f.room.state().current!.status, 'done');
+  assert.equal(f.room.state().current!.swarmTasks?.length, 2);
+});
+
+test('swarm applies explicit per-task provider routes and dependency IDs', (t) => {
+  const f = fixture({ git: true }); t.after(() => f.close());
+  assert.equal(f.start({ pattern: 'swarm', prompt: 'Add a new settings workflow' }), undefined);
+  const runId = f.room.state().current!.id;
+  writeFileSync(path.join(f.cwd(), 'plan.json'), JSON.stringify({ schemaVersion: 1, tasks: [
+    { id: 'api', 'agent-name': 'backend worker', work: 'Implement the settings API.', dependsOn: [], acceptanceCriteria: ['API has tests.'], route: { role: 'backend', provider: 'opencode', model: 'openai/gpt-5' } },
+    { id: 'ui', 'agent-name': 'frontend worker', work: 'Build the settings form.', dependsOn: ['api'], acceptanceCriteria: ['Form works on mobile.'], route: { role: 'frontend', provider: 'codex' } },
+  ] }));
+  const planner = f.workers[0];
+  planner.status = 'working'; f.room.onWorker(planner);
+  planner.status = 'done'; f.room.onWorker(planner);
+  assert.deepEqual(f.queuedTasks.map((task) => [task.provider, task.model, task.swarmRole, task.swarmDependsOn]), [
+    ['opencode', 'openai/gpt-5', 'backend', []],
+    ['codex', undefined, 'frontend', [`${runId}-api`]],
+  ]);
+  assert.match(f.queuedTasks[0].swarmRouteReason ?? '', /plan route for backend/);
+});
+
+test('swarm refuses malformed plans without queueing any tasks', (t) => {
+  const f = fixture({ git: true }); t.after(() => f.close());
+  assert.equal(f.start({ pattern: 'swarm', prompt: 'Improve the project' }), undefined);
+  writeFileSync(path.join(f.cwd(), 'plan.json'), '{"tasks":[{"agent-name":"frontend worker","work":"build it"}]}');
+  const planner = f.workers[0];
+  planner.status = 'working'; f.room.onWorker(planner);
+  planner.status = 'done'; f.room.onWorker(planner);
+  assert.equal(f.room.state().current!.status, 'stopped');
+  assert.match(f.room.state().current!.reason ?? '', /2 to 12 tasks/);
+  assert.equal(f.queuedTasks.length, 0);
+});
+
+test('stopping a running swarm cancels its queued tasks and updates the meeting state', (t) => {
+  const f = fixture({ git: true }); t.after(() => f.close());
+  assert.equal(f.start({ pattern: 'swarm', prompt: 'Improve the project' }), undefined);
+  writeFileSync(path.join(f.cwd(), 'plan.json'), JSON.stringify({ tasks: [
+    { 'agent-name': 'frontend worker', work: 'Improve the main page.' },
+    { 'agent-name': 'test worker', work: 'Add a regression test.' },
+  ] }));
+  const planner = f.workers[0];
+  planner.status = 'working'; f.room.onWorker(planner);
+  planner.status = 'done'; f.room.onWorker(planner);
+  assert.equal(f.queuedTasks.length, 2);
+
+  assert.equal(f.room.stop('Ada'), undefined);
+  assert.equal(f.room.state().current!.status, 'stopped');
+  assert.equal(f.queuedTasks.length, 0);
+  assert.ok(f.room.state().current!.swarmTasks?.every((task) => task.outcome === 'killed'));
+  const summary = JSON.parse(readFileSync(path.join(f.dir, '.agent-office', 'meetings', f.room.state().current!.id, 'summary.json'), 'utf8'));
+  assert.equal(summary.status, 'stopped');
+  assert.ok(summary.tasks.every((task: { status: string }) => task.status === 'cancelled'));
+});
+
+test('partial swarms persist an auditable summary without claiming acceptance criteria passed', (t) => {
+  const f = fixture({ git: true }); t.after(() => f.close());
+  assert.equal(f.start({ pattern: 'swarm', prompt: 'Improve the settings workflow' }), undefined);
+  writeFileSync(path.join(f.cwd(), 'plan.json'), JSON.stringify({ schemaVersion: 1, tasks: [
+    { id: 'api', 'agent-name': 'backend worker', work: 'Implement the settings API.', acceptanceCriteria: ['API tests pass.'], route: { role: 'backend', provider: 'auto' } },
+    { id: 'ui', 'agent-name': 'frontend worker', work: 'Build the settings form.', acceptanceCriteria: ['Form works on mobile.'], route: { role: 'frontend', provider: 'auto' } },
+  ] }));
+  const planner = f.workers[0];
+  planner.status = 'working'; f.room.onWorker(planner);
+  planner.status = 'done'; f.room.onWorker(planner);
+  const meeting = f.room.state().current!;
+  f.queuedTasks[0].status = 'done';
+  f.queuedTasks[0].outcome = 'done';
+  f.queuedTasks[0].branch = 'office/swarm-api';
+  f.queuedTasks[0].pr = { number: 42, url: 'https://github.com/example/project/pull/42', state: 'OPEN', title: 'Implement settings API' };
+  f.queuedTasks[1].status = 'done';
+  f.queuedTasks[1].outcome = 'blocked';
+  f.queuedTasks[1].error = 'Blocked by unsuccessful dependency api';
+  f.room.pump();
+
+  assert.equal(f.room.state().current!.status, 'partial');
+  const reportPath = path.join(f.dir, '.agent-office', 'meetings', meeting.id, 'summary.json');
+  const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+  assert.equal(report.status, 'partial');
+  assert.equal(report.tasks[0].branch, 'office/swarm-api');
+  assert.equal(report.tasks[0].pr.number, 42);
+  assert.deepEqual(report.tasks[0].acceptanceCriteria, [{ criterion: 'API tests pass.', status: 'not-verified' }]);
+  assert.equal(report.tasks[1].status, 'blocked');
+});
+
+test('a restored swarm idempotently re-enqueues a task missing during partial dispatch', (t) => {
+  const f = fixture({ git: true }); t.after(() => f.close());
+  assert.equal(f.start({ pattern: 'swarm', prompt: 'Improve the project' }), undefined);
+  writeFileSync(path.join(f.cwd(), 'plan.json'), JSON.stringify({ tasks: [
+    { id: 'api', 'agent-name': 'backend worker', work: 'Build the API.' },
+    { id: 'tests', 'agent-name': 'test worker', work: 'Test the API.' },
+  ] }));
+  const planner = f.workers[0];
+  planner.status = 'working'; f.room.onWorker(planner);
+  planner.status = 'done'; f.room.onWorker(planner);
+  assert.equal(f.queuedTasks.length, 2);
+
+  f.queuedTasks.splice(1, 1);
+  f.room.shutdown();
+  const statePath = path.join(f.dir, '.agent-office', 'meetings.json');
+  const saved = JSON.parse(readFileSync(statePath, 'utf8'));
+  saved.current.swarmTasks[1].enqueued = false;
+  writeFileSync(statePath, JSON.stringify(saved));
+  f.restore();
+  assert.equal(f.room.state().current!.swarmTasks?.[1].enqueued, false, 'restored run should still show the second task as pending enqueue');
+  f.room.pump();
+
+  assert.equal(f.queuedTasks.length, 2);
+  assert.deepEqual(f.queuedTasks.map((task) => task.id), [`${f.room.state().current!.id}-api`, `${f.room.state().current!.id}-tests`]);
+  assert.ok(f.room.state().current!.swarmTasks?.every((task) => task.enqueued));
+});
+
+test('a completed swarm report refreshes when its pull request appears later', (t) => {
+  const f = fixture({ git: true }); t.after(() => f.close());
+  assert.equal(f.start({ pattern: 'swarm', prompt: 'Implement a settings API' }), undefined);
+  writeFileSync(path.join(f.cwd(), 'plan.json'), JSON.stringify({ tasks: [
+    { id: 'api', 'agent-name': 'backend worker', work: 'Implement the API.' },
+    { id: 'tests', 'agent-name': 'test worker', work: 'Test the API.' },
+  ] }));
+  const planner = f.workers[0];
+  planner.status = 'working'; f.room.onWorker(planner);
+  planner.status = 'done'; f.room.onWorker(planner);
+  for (const task of f.queuedTasks) { task.status = 'done'; task.outcome = 'done'; }
+  f.room.pump();
+  const runId = f.room.state().current!.id;
+  const reportPath = path.join(f.dir, '.agent-office', 'meetings', runId, 'summary.json');
+  assert.equal(JSON.parse(readFileSync(reportPath, 'utf8')).tasks[0].pr, undefined);
+
+  f.queuedTasks[0].branch = 'office/settings-api';
+  f.queuedTasks[0].pr = { number: 57, url: 'https://github.com/example/project/pull/57', state: 'OPEN', title: 'Settings API' };
+  f.room.pump();
+  const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+  assert.equal(report.tasks[0].branch, 'office/settings-api');
+  assert.equal(report.tasks[0].pr.number, 57);
 });
 
 test('in a git project the output is committed on the meeting branch, which outlives the room being cleared', async (t) => {

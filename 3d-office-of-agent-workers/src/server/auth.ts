@@ -29,11 +29,18 @@ export class Auth {
   constructor(
     private verifier: Buffer,
     private salt: Buffer,
-    secret: string,
+    private secret: string,
     private accounts: Accounts,
   ) {
     this.key = createHmac('sha256', secret).update('session:').update(verifier).digest();
     this.accountKey = createHmac('sha256', secret).update('account-session:').digest();
+  }
+
+  /** Change the shared password and invalidate cookies issued under the old one. */
+  setPassword(verifier: Buffer, salt: Buffer) {
+    this.verifier = Buffer.from(verifier);
+    this.salt = Buffer.from(salt);
+    this.key = createHmac('sha256', this.secret).update('session:').update(this.verifier).digest();
   }
 
   /** scrypt runs on the libuv pool, so guessing can't stall the event loop. */

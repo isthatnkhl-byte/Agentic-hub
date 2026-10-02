@@ -873,10 +873,23 @@ export async function startServer(cfg: Config) {
                        (token && token.toUpperCase() === cfg.roomCode.toUpperCase());
     if (isRoomCode) {
       if (guess.body.peek === true) {
-        return send(res, 200, { name: '', role: 'member', by: 'Room Host', project: officeName, roomCode: cfg.roomCode });
+        return send(res, 200, {
+          name: '', role: 'member', by: 'Room Host', project: officeName, roomCode: cfg.roomCode,
+          officePasswordRequired: cfg.officePasswordCustom && accounts.sharedPassword,
+        });
       }
       const rawName = str(guess.body.name, 64).trim();
-      const r = await accounts.joinWithRoomCode(rawName || 'Guest', str(guess.body.password, 1024));
+      const officePasswordRequired = cfg.officePasswordCustom && accounts.sharedPassword;
+      const password = str(guess.body.password, 512);
+      let r: Awaited<ReturnType<typeof accounts.joinWithRoomCode>>;
+      if (officePasswordRequired) {
+        if (!password || !(await auth.checkPassword(password))) {
+          return send(res, 401, { error: 'Enter the office password shared by the room owner.' });
+        }
+        r = await accounts.joinWithRoomCode(rawName || 'Guest');
+      } else {
+        r = await accounts.joinWithRoomCode(rawName || 'Guest', str(guess.body.password, 1024));
+      }
       if (typeof r === 'string') return send(res, 400, { error: r });
       if ('guestName' in r) {
         auth.recordSuccess(guess.ip);
@@ -984,6 +997,34 @@ export async function startServer(cfg: Config) {
         if (p.startsWith('/api/')) return send(res, 401, { error: 'Not logged in' });
         // Back to the 2D view after signing in, if that's where they were going.
         res.writeHead(302, { location: p === '/lite' ? '/login?next=/lite' : '/login' }).end();
+        return;
+      }
+      if (p === '/api/accounts/password' && req.method === 'POST') {
+        if (!meOf(session.account?.id, session.identityId, !!session.guestName).admin) {
+          return send(res, 403, { error: 'Only an office admin can change the shared password' });
+        }
+        let body: unknown;
+        try {
+          body = JSON.parse(await readBody(req, 4096));
+        } catch {
+          return send(res, 400, { error: 'Bad request' });
+        }
+        const password = body && typeof body === 'object' && 'password' in body && typeof body.password === 'string' ? body.password : '';
+        if (password.length < 8 || password.length > 512) {
+          return send(res, 400, { error: 'Use an office password between 8 and 512 characters' });
+        }
+        try {
+          cfg.setOfficePassword(password);
+        } catch {
+          return send(res, 500, { error: 'Could not save the office password' });
+        }
+        auth.setPassword(cfg.verifier, cfg.salt);
+        accounts.setSharedPassword(true);
+        accountsChanged();
+        send(res, 200, { ok: true }, { 'set-cookie': auth.cookie(req, auth.issue(session.account?.id), isSecure(req, cfg)) });
+        for (const client of clients.values()) {
+          if (!client.accountId && !client.guestName && client.identityId !== session.identityId) signOut(client);
+        }
         return;
       }
       if (p === '/api/whoami') return send(res, 200, { ok: true, me: meOf(session.account?.id, session.identityId, !!session.guestName) });
@@ -2393,6 +2434,7 @@ export async function startServer(cfg: Config) {
           provider: msg.provider,
           model: msg.model === undefined ? undefined : str(msg.model, OPEN_CODE_MODEL_MAX + 1),
           effort: isAgentEffort(msg.effort) ? msg.effort : undefined,
+          swarmLimit: count(msg.swarmLimit),
         };
         withSignIn(c, claudeFor(request.provider ?? floor.workers.officeDefault.provider), () => withFreshBase(c, floor, () => warn(c, floor.meetings.start(request, who, c.accountId, c.identityId))));
         break;
