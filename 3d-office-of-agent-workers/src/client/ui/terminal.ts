@@ -115,6 +115,31 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
   const pill = h('span.pill', {}, '');
   const cost = h('span.cost', {});
   const viewers = h('div.viewers', {});
+  const updateAutoApproveBtn = (auto?: boolean) => {
+    const on = auto ?? store.workers.get(workerId)?.autoApprove ?? false;
+    autoApproveBtn.textContent = on ? '⚡ Auto-Approve: ON' : '🛡️ Auto-Approve: OFF';
+    autoApproveBtn.classList.toggle('on', on);
+    autoApproveBtn.classList.toggle('off', !on);
+    autoApproveBtn.setAttribute('aria-pressed', String(on));
+    autoApproveBtn.title = isOwner
+      ? (on ? 'Auto-approve is ON: permissions are automatically granted. Click to toggle OFF.' : 'Auto-approve is OFF: click to toggle ON so you don’t have to manually approve.')
+      : 'Only the worker’s creator or admin can toggle auto-approve';
+  };
+  const autoApproveBtn = h('button.btn.auto-approve-btn', {
+    type: 'button',
+    disabled: !isOwner,
+    onclick: () => {
+      const cur = store.workers.get(workerId)?.autoApprove ?? false;
+      const next = !cur;
+      net.send({ t: 'worker.autoApprove', workerId, enabled: next });
+      const w = store.workers.get(workerId);
+      if (w) w.autoApprove = next;
+      updateAutoApproveBtn(next);
+      toast(`${info.name} auto-approve turned ${next ? 'ON' : 'OFF'}`);
+    },
+  });
+  updateAutoApproveBtn(info.autoApprove);
+
   const modelsBtn = h('button.btn', {
     type: 'button',
     title: 'OpenCode models: Ctrl+X then M (use /models if custom bindings override it)',
@@ -137,7 +162,7 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
   const sayForm = h('form.term-say', {}, say, sayBtn);
   const keypad = opts.keypad ? h('div.term-keypad', {}, keys, sayForm) : null;
   // The keypad has an Esc of its own.
-  const el = h('div.modal.term', { role: 'dialog', 'aria-label': `${info.name} terminal` }, h('header', {}, dot, title, pill, cost, viewers, typed, modelsBtn, keypad ? null : escBtn, onChanges ? changesBtn : null, closeBtn), host, keypad);
+  const el = h('div.modal.term', { role: 'dialog', 'aria-label': `${info.name} terminal` }, h('header', {}, dot, title, pill, cost, viewers, typed, autoApproveBtn, modelsBtn, keypad ? null : escBtn, onChanges ? changesBtn : null, closeBtn), host, keypad);
 
   const term = new Terminal({
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
@@ -257,6 +282,8 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
     cost.textContent = w.kind !== 'agent' ? '' : usageState === 'tracked' && w.usage ? usageLabel(w.usage, workerProvider) : waiting ? waiting : usageState === 'untracked' ? 'usage untracked' : '';
     cost.title = w.kind === 'agent' && w.usage ? usageTitle(w.usage, workerProvider) : w.kind === 'agent' ? providerUsageNote(workerProvider!) : '';
     renderPresence(w);
+    updateAutoApproveBtn(w.autoApprove);
+    autoApproveBtn.toggleAttribute('disabled', !isWCurrentOwner || isAsleep(w.status));
     const openCode = w.kind === 'agent' && resolvedProvider(w.provider, store.project) === 'opencode';
     modelsBtn.classList.toggle('hidden', !openCode);
     modelsBtn.toggleAttribute('disabled', !isWCurrentOwner || !openCode || !ready || isAsleep(w.status));

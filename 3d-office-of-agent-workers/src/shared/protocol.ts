@@ -93,6 +93,8 @@ export interface WorkerInfo {
   name: string;
   color: string;
   status: WorkerStatus;
+  /** When true, automatically approves permission prompts so user doesn't have to manually approve. */
+  autoApprove?: boolean;
   /** True once someone opened the terminal after the last done / needs_input. */
   acked: boolean;
   /** When it last went to done or needs_input (ms), so N goes to whoever has waited longest first. */
@@ -1191,9 +1193,11 @@ export type ClientMsg =
   | { t: 'profile'; name: string; color: string; look: Look }
   /** With `issue`, the worker is there for that GitHub issue: it's assigned on GitHub (so it moves to In progress) and taken off the queue. */
   /** With `repos` (other floors' ids), the worker works in their repositories too, each in a worktree of its own (see WorkerInfo.repos). */
-  | { t: 'worker.spawn'; deskId: string; prompt?: string; worktree?: boolean; kind?: WorkerKind; provider?: AgentProvider; model?: string; effort?: AgentEffort; issue?: number; repos?: string[]; via?: 'herald' }
+  | { t: 'worker.spawn'; deskId: string; prompt?: string; worktree?: boolean; kind?: WorkerKind; provider?: AgentProvider; model?: string; effort?: AgentEffort; issue?: number; repos?: string[]; via?: 'herald'; autoApprove?: boolean }
   | { t: 'worker.resume'; workerId: string }
   | { t: 'worker.kill'; workerId: string; cleanup?: WorktreeCleanup }
+  /** Toggle auto-approve on or off for this worker so the user does not have to manually approve prompts. */
+  | { t: 'worker.autoApprove'; workerId: string; enabled: boolean }
   /** Asks what the worker's worktree holds; answered with a `worker.worktree` message. */
   | { t: 'worker.worktree'; workerId: string }
   /** Puts a lost worker's worktree back and starts it again (see WorkerInfo.lost); `all`: every lost worker on the floor. */

@@ -166,6 +166,7 @@ function workerCard(w: WorkerInfo): HTMLElement {
           : (w.task?.summary ?? w.activity);
   const sub = [
     w.kind === 'agent' ? `⚙️ ${providerLabel(w.provider, store.project)}${badge ? ` · ${badge}` : ''}` : '🐚 shell',
+    w.autoApprove ? '⚡ Auto-Approve' : undefined,
     desk && (desk.station ? `📌 ${desk.label}` : desk.label),
     w.worktree && `🌿 ${w.worktree.branch}`,
     w.pr && `🔀 PR #${w.pr.number}`,
@@ -187,6 +188,23 @@ function workerCard(w: WorkerInfo): HTMLElement {
         h('span.lite-sub', {}, sub.join(' · ')),
       ),
       h('span.lite-state', {}, h('span.pill', { class: w.status }, STATUS_LABEL[w.status] ?? w.status), waiting && w.waitingSince ? h('small', {}, timeAgo(w.waitingSince)) : null),
+    ),
+    !owns || asleep ? null : h(
+      'button.btn.lite-auto-approve',
+      {
+        type: 'button',
+        title: w.autoApprove ? 'Auto-approve is ON: click to turn OFF' : 'Auto-approve is OFF: click to turn ON',
+        'aria-label': `Toggle auto-approve for ${w.name}`,
+        style: w.autoApprove ? 'color: #2ea043; font-weight: bold;' : 'opacity: 0.6;',
+        onclick: (e: Event) => {
+          e.stopPropagation();
+          const next = !w.autoApprove;
+          net.send({ t: 'worker.autoApprove', workerId: w.id, enabled: next });
+          w.autoApprove = next;
+          renderWorkers();
+        },
+      },
+      w.autoApprove ? '⚡' : '🛡️',
     ),
     // One that's asking something is answered in its terminal, where the question is.
     !owns || asleep || w.lost || w.status === 'needs_input' ? null : h('button.btn.lite-say', { type: 'button', title: `Send ${w.name} a prompt`, 'aria-label': `Send ${w.name} a prompt`, onclick: () => promptWorker(w.id) }, '✍️'),
@@ -270,8 +288,8 @@ function promptWorker(id: string) {
 }
 
 // ---- New work: a prompt for a worker who's here, or a new one at a free desk -------------------
-function hire(deskId: string, prompt: string, worktree: boolean, provider?: AgentProvider, model?: string, effort?: AgentEffort, repos?: string[]) {
-  net.send({ t: 'worker.spawn', deskId, prompt, worktree, provider, model, effort, repos: repos?.length ? repos : undefined });
+function hire(deskId: string, prompt: string, worktree: boolean, provider?: AgentProvider, model?: string, effort?: AgentEffort, repos?: string[], autoApprove?: boolean) {
+  net.send({ t: 'worker.spawn', deskId, prompt, worktree, provider, model, effort, repos: repos?.length ? repos : undefined, autoApprove });
 }
 
 function sendToWorker(title: string, text: { context?: string; initial?: string } = {}) {

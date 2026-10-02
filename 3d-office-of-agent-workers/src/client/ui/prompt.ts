@@ -17,9 +17,11 @@ export interface PromptOptions {
   worktreeOption?: boolean;
   /** Offer the configured agent provider choice (only when hiring a new worker). */
   providerOption?: boolean;
+  /** Offer the autoApprove toggle option (when spawning/hiring a worker). */
+  autoApproveOption?: boolean;
   /** Other floors' projects a new worker in its own worktree can work in too (see WorkerInfo.repos). */
   repoOptions?: { id: string; name: string }[];
-  onSubmit(text: string, opts: { worktree: boolean; provider?: AgentProvider; model?: string; effort?: AgentEffort; repos: string[] }): void;
+  onSubmit(text: string, opts: { worktree: boolean; provider?: AgentProvider; model?: string; effort?: AgentEffort; repos: string[]; autoApprove?: boolean }): void;
 }
 
 const WT_KEY = 'agent-office.worktree';
@@ -27,6 +29,16 @@ const WT_KEY = 'agent-office.worktree';
 export function worktreePref(): boolean {
   try {
     return localStorage.getItem(WT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+const AUTO_APPROVE_KEY = 'agent-office.autoApprove';
+/** Whether the last hire asked to auto-approve permission prompts. */
+export function autoApprovePref(): boolean {
+  try {
+    return localStorage.getItem(AUTO_APPROVE_KEY) === '1';
   } catch {
     return false;
   }
@@ -65,6 +77,16 @@ export function openPrompt(opts: PromptOptions) {
         '🌿 Work in its own git worktree & branch',
     )
     : null;
+  const autoApproveBox = h('input', { type: 'checkbox', id: 'auto-approve-toggle' }) as HTMLInputElement;
+  autoApproveBox.checked = autoApprovePref();
+  const autoApproveRow = opts.autoApproveOption
+    ? h(
+        'label',
+        { for: 'auto-approve-toggle', style: 'display:flex;gap:8px;align-items:center;margin:10px 0 0;font-weight:700;cursor:pointer', title: 'Automatically approve permission prompts for this worker' },
+        autoApproveBox,
+        '⚡ Auto-approve permission prompts',
+    )
+    : null;
   const repos = repoPicker(opts.worktreeOption ? opts.repoOptions : undefined, wtBox);
   const provider: ProviderPicker | null = opts.providerOption ? providerPicker(store.project, 'prompt-provider') : null;
   const submit = h('button.btn.primary', { type: 'submit' }, opts.submitLabel ?? 'Send ✨');
@@ -73,7 +95,7 @@ export function openPrompt(opts: PromptOptions) {
     'form.modal',
     { role: 'dialog', 'aria-label': opts.title },
     h('header', {}, h('h2', {}, opts.title)),
-    h('div.body', {}, opts.warning ? h('p.setting-note.bad', { style: 'margin:0 0 10px', role: 'alert' }, opts.warning) : null, opts.subtitle ? h('p', { style: 'margin:0 0 10px;font-weight:700;color:var(--muted)' }, opts.subtitle) : null, ta, provider?.element ?? null, wtRow, repos.element),
+    h('div.body', {}, opts.warning ? h('p.setting-note.bad', { style: 'margin:0 0 10px', role: 'alert' }, opts.warning) : null, opts.subtitle ? h('p', { style: 'margin:0 0 10px;font-weight:700;color:var(--muted)' }, opts.subtitle) : null, ta, provider?.element ?? null, wtRow, autoApproveRow, repos.element),
     h('footer', {}, h('span.grow', {}, 'Enter to send · Shift+Enter for a new line'), cancel, submit),
   ) as HTMLFormElement;
   form.noValidate = true;
@@ -95,8 +117,16 @@ export function openPrompt(opts: PromptOptions) {
         // storage blocked
       }
     }
+    if (opts.autoApproveOption) {
+      try {
+        localStorage.setItem(AUTO_APPROVE_KEY, autoApproveBox.checked ? '1' : '0');
+      } catch {
+        // storage blocked
+      }
+    }
     const worktree = !!opts.worktreeOption && wtBox.checked;
-    opts.onSubmit(text, { worktree, provider: provider?.value(), model: provider?.model(), effort: provider?.effort(), repos: worktree ? repos.value() : [] });
+    const autoApprove = opts.autoApproveOption ? autoApproveBox.checked : undefined;
+    opts.onSubmit(text, { worktree, provider: provider?.value(), model: provider?.model(), effort: provider?.effort(), repos: worktree ? repos.value() : [], autoApprove });
   };
   form.addEventListener('submit', (e) => {
     e.preventDefault();

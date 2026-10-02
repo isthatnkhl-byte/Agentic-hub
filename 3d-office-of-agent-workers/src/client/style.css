@@ -505,6 +505,28 @@ body.telescope-active #hud { visibility: hidden; }
 .modal.term header .typed.now { color: var(--ink); }
 @media (prefers-reduced-motion: reduce) { .avatar.typing { animation: none; } }
 .modal.term header .cost { font-size: 12px; font-weight: 800; color: var(--muted); white-space: nowrap; }
+.modal.term header .auto-approve-btn {
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.modal.term header .auto-approve-btn.on {
+  background: #238636;
+  border-color: #2ea043;
+  color: #fff;
+}
+.modal.term header .auto-approve-btn.off {
+  background: var(--paper-2);
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.modal.term header .auto-approve-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 /* A narrow window: the name and ✕ keep the top row and the rest wraps under them, rather than pushing ✕ off the edge. */
 @media (max-width: 640px) {
   .modal.term header { flex-wrap: wrap; row-gap: 8px; }

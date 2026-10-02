@@ -754,6 +754,25 @@ export class BossLaptop {
           '🔍 View Changes',
         );
 
+        const autoApproveBtn = h(
+          'button.boss-btn',
+          {
+            type: 'button',
+            disabled: !ownsWorker,
+            title: ownsWorker
+              ? (w.autoApprove ? 'Auto-approve is ON: click to turn OFF' : 'Auto-approve is OFF: click to turn ON so permissions are granted automatically')
+              : `Only ${w.createdBy} or an admin can control this worker`,
+            style: w.autoApprove ? 'background: #238636; border-color: #2ea043; color: #fff;' : '',
+            onclick: () => {
+              const next = !w.autoApprove;
+              this.net.send({ t: 'worker.autoApprove', workerId: w.id, enabled: next });
+              w.autoApprove = next;
+              renderAgentCards(searchInput.value.trim());
+            },
+          },
+          w.autoApprove ? '⚡ Auto-Approve: ON' : '🛡️ Auto-Approve: OFF',
+        );
+
         const dismissBtn = h(
           'button.boss-btn.boss-btn-danger',
           {
@@ -787,8 +806,9 @@ export class BossLaptop {
               'div.boss-agent-badges',
               {},
               h('span.boss-badge-pill', { class: statusBadgeClass }, statusText),
+              w.autoApprove ? h('span.boss-badge-pill', { style: 'background: #238636; color: #fff;' }, '⚡ Auto-Approve') : '',
               h('span.boss-badge-pill', { style: 'background: #21262d; color: #8b949e;' }, `📍 ${deskLabel}`),
-              w.provider ? h('span.boss-badge-pill', { style: 'background: #21262d; color: #58a6ff;' }, `🤖 ${w.provider}`) : false,
+              w.provider ? h('span.boss-badge-pill', { style: 'background: #21262d; color: #58a6ff;' }, `🤖 ${w.provider}`) : '',
             ),
           ),
           // Assigned Task Section (Explicitly requested by user)
@@ -807,7 +827,7 @@ export class BossLaptop {
             ),
           ),
           // Total Control Actions
-          h('div.boss-agent-actions', {}, terminalBtn, promptBtn, changesBtn, dismissBtn),
+          h('div.boss-agent-actions', {}, terminalBtn, autoApproveBtn, promptBtn, changesBtn, dismissBtn),
         );
 
         body.append(card);

@@ -1032,9 +1032,34 @@ export class DshSession {
     this.events.status(this.prompting ? 'working' : 'idle');
   }
 
+  autoApproveEnabled = false;
+
+  setAutoApprove(enabled: boolean): void {
+    this.autoApproveEnabled = enabled;
+    if (enabled && this.permission) {
+      this.triggerAutoApprove();
+    }
+  }
+
+  autoApprove(): boolean {
+    return this.autoApproveEnabled;
+  }
+
+  triggerAutoApprove(): boolean {
+    if (!this.permission) return false;
+    const allow = allowOption(this.permission.options);
+    const option = allow ?? this.permission.options.find((o) => o.once) ?? this.permission.options[0];
+    if (!option) return false;
+    this.answerPermission(option.optionId);
+    return true;
+  }
+
   private onPermission(id: unknown, params: unknown): void {
     const options = permissionOptions(params);
     this.permission = { id, options };
+    if (this.autoApproveEnabled && this.triggerAutoApprove()) {
+      return;
+    }
     const toolCall = isRec(params) && isRec(params.toolCall) ? params.toolCall : undefined;
     this.events.output(renderPermission(params, options, this.renderer.toolDetail(toolCall ? str(toolCall.toolCallId) : undefined)));
     this.events.status('needs_input');

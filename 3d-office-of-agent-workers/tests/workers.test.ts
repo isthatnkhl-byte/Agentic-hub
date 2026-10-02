@@ -1562,3 +1562,36 @@ test("a worker whose worktree was deleted outside the office waits, marked lost,
   assert.equal(after.get(gone.id)?.lost, undefined);
   assert.deepEqual(toasts, []);
 });
+
+test('auto-approve toggles per worker, persists across office restarts, and updates state', async (t) => {
+  const f = carryOnFixture(t);
+  const updates: WorkerInfo[] = [];
+  const toasts: string[] = [];
+  const office = new WorkerManager(f.root, f.data, f.claude, ['--from-test'], { url: 'http://127.0.0.1:1', token: '' }, { ...events(updates), toast: (text) => toasts.push(text) }, ledger(f.data));
+  t.after(() => office.shutdown());
+
+  // Spawn with autoApprove: true
+  const res = office.spawn('desk-1', 'test-user', 'task 1', false, 'agent', undefined, undefined, undefined, undefined, undefined, [], undefined, undefined, true);
+  assert.notEqual(typeof res, 'string');
+  const w = res as WorkerInfo;
+  assert.equal(w.autoApprove, true);
+
+  // Toggle off
+  assert.equal(office.setAutoApprove(w.id, false), true);
+  assert.equal(office.get(w.id)?.autoApprove, false);
+
+  // Toggle back on
+  assert.equal(office.setAutoApprove(w.id, true), true);
+  assert.equal(office.get(w.id)?.autoApprove, true);
+
+  // Restart office and verify persistence
+  office.shutdown(true);
+  const office2 = new WorkerManager(f.root, f.data, f.claude, ['--from-test'], { url: 'http://127.0.0.1:1', token: '' }, { ...events([]), toast: () => {} }, ledger(f.data));
+  t.after(() => office2.shutdown());
+  await office2.start();
+
+  const restored = office2.get(w.id);
+  assert.ok(restored);
+  assert.equal(restored?.autoApprove, true);
+});
+

@@ -595,6 +595,25 @@ test('a prompt works, raises needs_input on a permission request, and answers it
   assert.ok(state.actions.includes('failing') === false, 'a completed tool call is not a failure');
 });
 
+test('when auto-approve is enabled on a DSH session, a permission request is automatically approved without manual terminal input', async (t) => {
+  const f = tracked(t);
+  const { session, state } = startSession(f);
+  t.after(() => session.close());
+  await waitFor(() => state.statuses, (s) => s.includes('idle'));
+
+  assert.equal(session.autoApprove(), false);
+  session.setAutoApprove(true);
+  assert.equal(session.autoApprove(), true);
+
+  session.prompt('run the tests');
+  // It should automatically approve and complete without needing manual session.writeInput('1\r')
+  await waitFor(() => state.statuses, (s) => s.includes('done'));
+  const answer = JSON.parse(readFileSync(f.answers, 'utf8').trim().split('\n')[0]) as { outcome: { outcome: string; optionId?: string } };
+  assert.equal(answer.outcome.outcome, 'selected');
+  assert.equal(answer.outcome.optionId, 'allow-once');
+  assert.match(state.output, /permission answered: allow-once/);
+});
+
 test('Escape cancels a turn that is waiting on a person', async (t) => {
   const f = tracked(t);
   const { session, state } = startSession(f, {}, { DSH_FAKE_NO_SETTLE: '1' });

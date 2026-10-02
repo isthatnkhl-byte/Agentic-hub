@@ -2362,8 +2362,8 @@ function officeIsFull(): boolean {
   return true;
 }
 
-function hire(deskId: string, prompt?: string, worktree = false, provider?: AgentProvider, model?: string, effort?: AgentEffort, issue?: number, repos?: string[], via?: 'herald') {
-  net.send({ t: 'worker.spawn', deskId, prompt, worktree, provider, model, effort, issue, repos: repos?.length ? repos : undefined, via });
+function hire(deskId: string, prompt?: string, worktree = false, provider?: AgentProvider, model?: string, effort?: AgentEffort, issue?: number, repos?: string[], via?: 'herald', autoApprove?: boolean) {
+  net.send({ t: 'worker.spawn', deskId, prompt, worktree, provider, model, effort, issue, repos: repos?.length ? repos : undefined, via, autoApprove });
   // The moment notifications start to matter: ask once (it has to come from a key press or click).
   if (settings.notify && notifyPermission() === 'default' && !askedToNotify) {
     askedToNotify = true;
@@ -2396,9 +2396,10 @@ function promptAtDesk(deskId: string) {
       warning: pressureNote(store.machine),
       submitLabel: 'Hire & start',
       providerOption: true,
+      autoApproveOption: true,
       worktreeOption: !!store.project?.branch,
       repoOptions: repoChoices(),
-      onSubmit: (text, o) => hire(deskId, text, o.worktree, o.provider, o.model, o.effort, undefined, o.repos),
+      onSubmit: (text, o) => hire(deskId, text, o.worktree, o.provider, o.model, o.effort, undefined, o.repos, undefined, o.autoApprove),
     });
   } else if (!ownsWorker(w)) {
     toast(`Only ${w.createdBy} or an admin can command this worker`, 'warn');
@@ -2434,9 +2435,10 @@ function hireAtDesk(deskId: string) {
     submitLabel: 'Hire & start',
     allowEmpty: true,
     providerOption: true,
+    autoApproveOption: true,
     worktreeOption: !!store.project?.branch,
     repoOptions: repoChoices(),
-    onSubmit: (text, o) => hire(deskId, text || undefined, o.worktree, o.provider, o.model, o.effort, undefined, o.repos),
+    onSubmit: (text, o) => hire(deskId, text || undefined, o.worktree, o.provider, o.model, o.effort, undefined, o.repos, undefined, o.autoApprove),
   });
 }
 
@@ -3058,6 +3060,7 @@ function hireFromHerald() {
     submitLabel: h.button,
     allowEmpty: true,
     providerOption: true,
+    autoApproveOption: true,
     worktreeOption: !!store.project?.branch,
     repoOptions: repoChoices(),
     onSubmit: (text, o) => {
@@ -3065,7 +3068,7 @@ function hireFromHerald() {
       const deskId = heraldSeat();
       if (!deskId) return toast('Every seat at the tables is taken now', 'warn');
       heraldHires.set(deskId, { floor: store.floor, at: performance.now() });
-      hire(deskId, text || undefined, o.worktree, o.provider, o.model, o.effort, undefined, o.repos, 'herald');
+      hire(deskId, text || undefined, o.worktree, o.provider, o.model, o.effort, undefined, o.repos, 'herald', o.autoApprove);
     },
   });
 }

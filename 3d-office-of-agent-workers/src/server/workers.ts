@@ -384,7 +384,7 @@ export class WorkerManager {
    * (see meetings.ts), in the meeting's own worktree, which everyone at the table shares. `repos` are
    * other floors' repositories a worker in its own worktree works in too (see makeWorkspace).
    */
-  spawn(deskId: string, by: string, prompt?: string, worktree = false, kind: WorkerKind = 'agent', provider?: AgentProvider, model?: string, effort?: AgentEffort, meeting?: { id: string; worktree?: WorkerInfo['worktree'] }, owner?: string, repos: RepoSource[] = [], via?: 'herald', createdById?: string): WorkerInfo | string {
+  spawn(deskId: string, by: string, prompt?: string, worktree = false, kind: WorkerKind = 'agent', provider?: AgentProvider, model?: string, effort?: AgentEffort, meeting?: { id: string; worktree?: WorkerInfo['worktree'] }, owner?: string, repos: RepoSource[] = [], via?: 'herald', createdById?: string, autoApprove?: boolean): WorkerInfo | string {
     // Nobody picked (a board agent, say): the office's default worker, model and effort included.
     if (kind === 'agent' && provider === undefined) ({ provider, model, effort } = this.officeDefault);
     const selectedProvider = kind === 'agent' ? provider : undefined;
@@ -454,6 +454,7 @@ export class WorkerManager {
       viewerIds: [],
       activity: prompt ? truncate(prompt, 80) : undefined,
       meeting: meeting?.id,
+      autoApprove: autoApprove || undefined,
     };
     const w = newWorker(info, newTracker());
     w.owner = owner;
@@ -964,6 +965,43 @@ export class WorkerManager {
     return undefined;
   }
 
+  /** Toggles auto-approve on or off for a worker. */
+  setAutoApprove(id: string, enabled: boolean): boolean {
+    const w = this.workers.get(id);
+    if (!w) return false;
+    w.info.autoApprove = enabled;
+    w.dsh?.setAutoApprove(enabled);
+    this.emitUpdate(w);
+    this.persist();
+    if (enabled && (w.info.status === 'needs_input' || w.info.status === 'working')) {
+      this.attemptAutoApprove(w);
+    }
+    return true;
+  }
+
+  /**
+   * If auto-approve is enabled for this worker, automatically answers permission / approval prompts.
+   */
+  attemptAutoApprove(w: Worker): void {
+    if (!w.info.autoApprove) return;
+    if (w.dsh) {
+      w.dsh.triggerAutoApprove();
+      return;
+    }
+    if (!w.pty || w.bootBlocked) return;
+    const text = w.term ? screenText(w.term) : '';
+    if (/\b\(?[yY]\/[nN]\)?/.test(text)) {
+      w.pty.write('y\r');
+    } else {
+      w.pty.write('1\r');
+      setTimeout(() => {
+        if (w.info.status === 'needs_input' && !w.bootBlocked) {
+          w.pty?.write('\r');
+        }
+      }, 120);
+    }
+  }
+
   /**
    * Pushes a worktree worker's branch and opens a pull request for it, with a title and body
    * drafted from its task, as `as` (whoever pressed the button) or else the office. Resolves to the
@@ -1175,11 +1213,21 @@ export class WorkerManager {
         break;
       case 'PermissionRequest':
         w.info.activity = `Wants permission: ${describeTool(payload)}`;
-        this.setStatus(w, 'needs_input');
+        if (w.info.autoApprove) {
+          w.info.activity = `Auto-approving: ${describeTool(payload)}`;
+          this.emitUpdate(w);
+          setTimeout(() => this.attemptAutoApprove(w), 100);
+        } else {
+          this.setStatus(w, 'needs_input');
+        }
         break;
       case 'Notification':
         if (payload?.notification_type === 'permission_prompt') {
-          if (now - w.leftNeedsInputAt > LATE_PROMPT_GRACE_MS) this.setStatus(w, 'needs_input');
+          if (w.info.autoApprove) {
+            setTimeout(() => this.attemptAutoApprove(w), 100);
+          } else if (now - w.leftNeedsInputAt > LATE_PROMPT_GRACE_MS) {
+            this.setStatus(w, 'needs_input');
+          }
         } else if (payload?.notification_type === 'idle_prompt') {
           if (w.info.status === 'working') this.setStatus(w, 'done');
         }
@@ -1245,12 +1293,18 @@ export class WorkerManager {
         break;
       case 'PermissionRequest':
         w.info.activity = `Wants permission: ${truncate(report.tool ?? 'tool', 80)}`;
-        // PermissionRequest has no tool_use_id in the native schema. Keep every matching
-        // active call pending so an unrelated parallel tool cannot dismiss the prompt.
-        const candidates = [...w.codexTools].filter(([, tool]) => tool === report.tool);
-        if (!candidates.length) w.codexPermissionUnknown = true;
-        for (const [id] of candidates) w.codexPending.add(id);
-        this.setStatus(w, 'needs_input');
+        if (w.info.autoApprove) {
+          w.info.activity = `Auto-approving: ${truncate(report.tool ?? 'tool', 80)}`;
+          this.emitUpdate(w);
+          setTimeout(() => this.attemptAutoApprove(w), 100);
+        } else {
+          // PermissionRequest has no tool_use_id in the native schema. Keep every matching
+          // active call pending so an unrelated parallel tool cannot dismiss the prompt.
+          const candidates = [...w.codexTools].filter(([, tool]) => tool === report.tool);
+          if (!candidates.length) w.codexPermissionUnknown = true;
+          for (const [id] of candidates) w.codexPending.add(id);
+          this.setStatus(w, 'needs_input');
+        }
         break;
       case 'PostToolUse':
         if (report.toolUseId) {
@@ -1371,7 +1425,13 @@ export class WorkerManager {
         break;
       case 'PermissionRequest':
         w.info.activity = `Wants permission: ${truncate(report.tool ?? 'tool', 80)}`;
-        this.setStatus(w, 'needs_input');
+        if (w.info.autoApprove) {
+          w.info.activity = `Auto-approving: ${truncate(report.tool ?? 'tool', 80)}`;
+          this.emitUpdate(w);
+          setTimeout(() => this.attemptAutoApprove(w), 100);
+        } else {
+          this.setStatus(w, 'needs_input');
+        }
         break;
       case 'PostToolUse':
       case 'PostToolUseFailure':
@@ -1382,7 +1442,11 @@ export class WorkerManager {
         break;
       case 'Notification':
         if (report.notificationType === 'permission_prompt') {
-          if (Date.now() - w.leftNeedsInputAt > LATE_PROMPT_GRACE_MS) this.setStatus(w, 'needs_input');
+          if (w.info.autoApprove) {
+            setTimeout(() => this.attemptAutoApprove(w), 100);
+          } else if (Date.now() - w.leftNeedsInputAt > LATE_PROMPT_GRACE_MS) {
+            this.setStatus(w, 'needs_input');
+          }
         } else if (report.notificationType === 'idle_prompt') {
           if (w.info.status === 'working') this.setStatus(w, 'done');
         }
@@ -1437,7 +1501,15 @@ export class WorkerManager {
     } else if (payload.detail) {
       w.info.activity = truncate(payload.detail, 80);
     }
-    if (payload.status === 'needs_input') this.setStatus(w, 'needs_input');
+    if (payload.status === 'needs_input') {
+      if (w.info.autoApprove && payload.type === 'permission') {
+        w.info.activity = `Auto-approving: ${payload.tool ?? 'permission'}`;
+        this.emitUpdate(w);
+        setTimeout(() => this.attemptAutoApprove(w), 100);
+      } else {
+        this.setStatus(w, 'needs_input');
+      }
+    }
     else if (payload.status === 'working') this.setStatus(w, 'working');
     else if (payload.status === 'done' && w.pty) this.setStatus(w, w.openCodeError ? 'needs_input' : 'done');
     else if (payload.status === 'starting' && w.info.status === 'starting') this.setStatus(w, 'idle');
@@ -1791,6 +1863,7 @@ export class WorkerManager {
       },
     );
     w.dsh = session;
+    session.setAutoApprove(Boolean(info.autoApprove));
     session.start();
   }
 
@@ -2033,6 +2106,9 @@ export class WorkerManager {
     if (status === 'done' || status === 'needs_input') {
       w.info.acked = status === 'done' && (w.viewers.size > 0 || !!w.info.meeting);
       w.info.waitingSince = Date.now();
+      if (status === 'needs_input' && w.info.autoApprove && !w.bootBlocked) {
+        setTimeout(() => this.attemptAutoApprove(w), 120);
+      }
     } else w.info.acked = true;
     this.emitUpdate(w);
     // What a restarted office picks the worker back up as, should its terminal outlive this one.
@@ -2211,6 +2287,7 @@ process.stdin.on('end', () => {
       activity: info.activity,
       task: info.task,
       pr: info.pr,
+      autoApprove: info.autoApprove,
       meeting: info.meeting,
       workedMs: workedMs(info),
       tracker: info.kind === 'agent' ? tracker : undefined,
@@ -2272,6 +2349,7 @@ process.stdin.on('end', () => {
           viewerIds: [],
           meeting: typeof s.meeting === 'string' && DESK_BY_ID.get(s.deskId)?.room ? s.meeting : undefined,
           workedMs: typeof s.workedMs === 'number' && Number.isFinite(s.workedMs) && s.workedMs > 0 ? s.workedMs : undefined,
+          autoApprove: typeof s.autoApprove === 'boolean' ? s.autoApprove : undefined,
         };
         const w = newWorker(info, tracker, typeof s.hookToken === 'string' && s.hookToken ? s.hookToken : undefined);
         if (typeof s.owner === 'string' && s.owner) w.owner = s.owner;

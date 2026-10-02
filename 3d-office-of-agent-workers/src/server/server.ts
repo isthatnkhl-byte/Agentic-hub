@@ -2060,7 +2060,7 @@ export async function startServer(cfg: Config) {
         }
         const useWorktree = msg.worktree !== false && !!floor.project.branch;
         const hire = () => {
-          const r = floor.workers.spawn(str(msg.deskId, 32), who, str(msg.prompt, 20000) || undefined, useWorktree, kind, msg.provider, model, effort, undefined, c.accountId, repos, msg.via === 'herald' ? 'herald' : undefined, c.identityId);
+          const r = floor.workers.spawn(str(msg.deskId, 32), who, str(msg.prompt, 20000) || undefined, useWorktree, kind, msg.provider, model, effort, undefined, c.accountId, repos, msg.via === 'herald' ? 'herald' : undefined, c.identityId, Boolean(msg.autoApprove));
           const issue = kind === 'agent' ? issueNumber(msg.issue) : undefined;
           const across = repos.length ? ` across ${[floor.def.name, ...repos.map((x) => x.name)].join(' + ')}` : '';
           if (typeof r === 'string') warn(c, r);
@@ -2073,6 +2073,18 @@ export async function startServer(cfg: Config) {
         // Every project it gets a worktree of starts from what's on GitHub.
         const fresh = [floor, ...repos.map((x) => floors.get(x.floor)!)];
         withSignIn(c, kind === 'agent' ? claudeFor(msg.provider ?? floor.workers.officeDefault.provider) : undefined, () => (useWorktree ? withFreshBase(c, fresh, hire) : hire()));
+        break;
+      }
+      case 'worker.autoApprove': {
+        const w = worker(msg.workerId);
+        if (!w) break;
+        if (!mayControl(w.info)) {
+          warn(c, `Only ${w.info.createdBy} or an admin can change auto-approve for ${w.info.name}`);
+          break;
+        }
+        const enabled = Boolean(msg.enabled);
+        w.floor.workers.setAutoApprove(w.wid, enabled);
+        toastFloor(w.floor, `${who} turned auto-approve ${enabled ? 'ON' : 'OFF'} for ${w.info.name}`);
         break;
       }
       case 'worker.resume': {
