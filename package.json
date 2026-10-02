@@ -1,0 +1,13 @@
+{
+  "name": "agentic-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agentic Hub workspace root",
+  "scripts": {
+    "dev": "npm --prefix 3d-office-of-agent-workers run dev",
+    "build": "npm --prefix 3d-office-of-agent-workers run build",
+    "test": "npm --prefix 3d-office-of-agent-workers test",
+    "typecheck": "npm --prefix 3d-office-of-agent-workers run typecheck",
+    "start": "npm --prefix 3d-office-of-agent-workers start"
+  }
+}

@@ -78,6 +78,7 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0',
     port: 5173,
     proxy: {
       // Not the string shorthand: that sets changeOrigin, so /api would see Host :4600 while /ws sees
