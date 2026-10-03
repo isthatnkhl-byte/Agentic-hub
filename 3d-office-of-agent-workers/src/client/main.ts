@@ -5319,6 +5319,8 @@ async function whoami(): Promise<boolean> {
   try {
     const res = await fetch('/api/whoami', { cache: 'no-store' });
     if (res.status === 401) {
+      const line = document.querySelector<HTMLElement>('#loading .loading-say');
+      if (line) line.textContent = 'Opening sign-in…';
       location.href = '/login';
       return false;
     }
@@ -5347,10 +5349,12 @@ void whoami().then((ok) => {
         off();
         resolve();
       });
+      setTimeout(resolve, 6000);
     });
+    const dogReady = Promise.race([dog.firstReady, new Promise<void>((r) => setTimeout(r, 6000))]);
     loading.until([
       { say: 'Knocking on the door', done: welcomed },
-      { say: 'Fetching the dog', done: dog.firstReady },
+      { say: 'Fetching the dog', done: dogReady },
     ]);
   } else {
     // Pick a character first (people from before there was a choice keep their name and color).

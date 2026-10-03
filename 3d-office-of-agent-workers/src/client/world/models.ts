@@ -70,12 +70,31 @@ function tell() {
   for (const fn of watchers) fn({ ...progress });
 }
 
+const MODEL_LOAD_TIMEOUT_MS = 8000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 /** Each file loads once, the first time something asks for it. */
 function fetchModel(name: ModelName): Promise<GLTF> {
   let p = loading.get(name);
   if (!p) {
     // Each chunk that comes in tells the watchers too, though the counts are still by file.
-    p = new GLTFLoader().loadAsync(MODELS[name].url, () => tell()).then((gltf) => {
+    const loadPromise = new GLTFLoader().loadAsync(MODELS[name].url, () => tell());
+    p = withTimeout(loadPromise, MODEL_LOAD_TIMEOUT_MS, `Timed out loading model ${name}.glb after ${MODEL_LOAD_TIMEOUT_MS}ms`).then((gltf) => {
       loaded.set(name, gltf);
       return gltf;
     });
