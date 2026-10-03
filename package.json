@@ -8,6 +8,9 @@
     "build": "npm --prefix 3d-office-of-agent-workers run build",
     "test": "npm --prefix 3d-office-of-agent-workers test",
     "typecheck": "npm --prefix 3d-office-of-agent-workers run typecheck",
-    "start": "npm --prefix 3d-office-of-agent-workers start"
+    "start": "npm --prefix 3d-office-of-agent-workers start",
+    "dev:shoe": "npm --prefix shoe-retail-saas run dev",
+    "build:shoe": "npm --prefix shoe-retail-saas run build",
+    "preview:shoe": "npm --prefix shoe-retail-saas run preview"
   }
 }
