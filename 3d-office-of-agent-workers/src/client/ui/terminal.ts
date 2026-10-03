@@ -3,7 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import type { Net } from '../net';
 import { store } from '../state';
-import { TERM_THEME } from './termtheme';
+import { TERM_THEME, TERMINAL_THEME_CHOICES, setTerminalTheme, onTerminalThemeChange, type TerminalTheme, type TerminalThemeId } from './termtheme';
 import { h, openModal, STATUS_LABEL, timeAgo, toast, type Modal } from './dom';
 import { usageLabel, usageTitle } from './usage';
 import type { ServerMsg, WorkerInfo } from '../../shared/protocol';
@@ -160,9 +160,24 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
   const say = h('input', { type: 'text', placeholder: 'Reply, or tell it what to do next…', 'aria-label': 'Prompt', enterkeyhint: 'send', autocomplete: 'off' }) as HTMLInputElement;
   const sayBtn = h('button.btn.primary', { type: 'submit' }, 'Send');
   const sayForm = h('form.term-say', {}, say, sayBtn);
+  const themeSelect = h(
+    'select.btn.term-theme-select',
+    {
+      title: 'Terminal theme: pick a color theme if text matches the background',
+      'aria-label': 'Terminal color theme',
+      onchange: () => {
+        setTerminalTheme(themeSelect.value as TerminalThemeId);
+      },
+    },
+    ...TERMINAL_THEME_CHOICES.map((t) =>
+      h('option', { value: t.id }, `🎨 ${t.label}`)
+    ),
+  ) as HTMLSelectElement;
+  themeSelect.value = TERM_THEME.id;
+
   const keypad = opts.keypad ? h('div.term-keypad', {}, keys, sayForm) : null;
   // The keypad has an Esc of its own.
-  const el = h('div.modal.term', { role: 'dialog', 'aria-label': `${info.name} terminal` }, h('header', {}, dot, title, pill, cost, viewers, typed, autoApproveBtn, modelsBtn, keypad ? null : escBtn, onChanges ? changesBtn : null, closeBtn), host, keypad);
+  const el = h('div.modal.term', { role: 'dialog', 'aria-label': `${info.name} terminal` }, h('header', {}, dot, title, pill, cost, viewers, typed, autoApproveBtn, modelsBtn, themeSelect, keypad ? null : escBtn, onChanges ? changesBtn : null, closeBtn), host, keypad);
 
   const term = new Terminal({
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
@@ -175,6 +190,15 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
     allowProposedApi: true,
     macOptionIsMeta: true,
   });
+
+  const applyTheme = (theme: TerminalTheme) => {
+    term.options.theme = theme;
+    themeSelect.value = theme.id;
+    host.style.background = theme.background;
+    el.style.background = theme.background;
+  };
+  const offTheme = onTerminalThemeChange(applyTheme);
+  applyTheme(TERM_THEME);
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon());
@@ -369,6 +393,7 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
       clearInterval(typingTimer);
       ro.disconnect();
       net.send({ t: 'worker.detach', workerId });
+      offTheme();
       term.dispose();
       if (current?.modal === modal) current = null;
     },

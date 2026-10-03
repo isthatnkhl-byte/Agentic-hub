@@ -10,6 +10,7 @@ import type { CabinetFrame, CabinetState } from '../shared/cabinet';
 import type { BallState } from '../shared/hoop';
 import { parked, type CarSeat, type CarState } from '../shared/garage';
 import { OFFICE_MAP, planOf, type MapPlan } from '../shared/maps';
+import { type TerminalThemeId, TERMINAL_THEMES, loadTerminalTheme, setTerminalTheme } from './ui/termtheme';
 
 export type Topic = 'peers' | 'workers' | 'issues' | 'pulls' | 'chat' | 'project' | 'screens' | 'team' | 'upgrade' | 'services' | 'decor' | 'floorPlan' | 'usage' | 'limits' | 'queue' | 'me' | 'accounts' | 'signins' | 'notify' | 'machine' | 'floors' | 'floor' | 'projectsDir' | 'repos' | 'dog' | 'jukebox' | 'sky' | 'theme' | 'map' | 'leaveOnMerge' | 'whiteboard' | 'drawing' | 'cabinet' | 'cabinetFrame' | 'meeting' | 'prompts' | 'ball' | 'cars';
 
@@ -71,6 +72,8 @@ export interface Settings {
   hud: Record<HudPanel, boolean>;
   /** The ☰ menu's actions you pinned to the top bar, by id. */
   pins: string[];
+  /** Color theme for terminals and workstation displays. */
+  terminalTheme: TerminalThemeId;
 }
 
 const SETTINGS_KEY = 'agent-office.settings';
@@ -133,7 +136,7 @@ export function rememberSpot(s: Spot) {
 }
 
 export function loadSettings(): Settings {
-  const s: Settings = { view: 'first', volume: 0.7, muted: false, music: 0.5, musicMuted: false, pageTurns: true, pushToTalk: false, notify: true, hud: { ...HUD_DEFAULTS }, pins: ['invite', 'sync'] };
+  const s: Settings = { view: 'first', volume: 0.7, muted: false, music: 0.5, musicMuted: false, pageTurns: true, pushToTalk: false, notify: true, hud: { ...HUD_DEFAULTS }, pins: ['invite', 'sync'], terminalTheme: loadTerminalTheme() };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null');
     if (saved?.view === 'first' || saved?.view === 'third') s.view = saved.view;
@@ -150,6 +153,10 @@ export function loadSettings(): Settings {
       if (!s.pins.includes('invite')) s.pins.push('invite');
       if (!s.pins.includes('sync')) s.pins.push('sync');
     }
+    if (typeof saved?.terminalTheme === 'string' && saved.terminalTheme in TERMINAL_THEMES) {
+      s.terminalTheme = saved.terminalTheme as TerminalThemeId;
+      setTerminalTheme(s.terminalTheme);
+    }
   } catch {
     // storage blocked
   }
@@ -158,6 +165,7 @@ export function loadSettings(): Settings {
 
 export function saveSettings(s: Settings) {
   try {
+    if (s.terminalTheme) setTerminalTheme(s.terminalTheme);
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
   } catch {
     // storage blocked

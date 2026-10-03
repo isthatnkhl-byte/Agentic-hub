@@ -8,6 +8,7 @@ import { DOG_NAME_MAX, cleanDogName } from '../../shared/dog';
 import { h, openModal, timeAgo } from './dom';
 import { agentFields, choiceLabel, officeChoice } from './provider';
 import { openPromptEditor, rewrittenPrompts } from './prompts';
+import { TERMINAL_THEME_CHOICES, setTerminalTheme, loadTerminalTheme, type TerminalThemeId } from './termtheme';
 
 const VIEWS: [ViewMode, string, string][] = [
   ['first', '👀 First person', 'See through your own eyes. Click the office to look around with the mouse and click things to use them. Esc frees the mouse.'],
@@ -72,6 +73,29 @@ export function openSettings(net: Net, settings: Settings, onChange: (s: Setting
     note.textContent = VIEWS.find(([v]) => v === settings.view)![2];
   };
   paint();
+
+  const termThemeSelect = h(
+    'select.provider-select',
+    {
+      'aria-label': 'Terminal theme',
+      onchange: () => {
+        const val = termThemeSelect.value as TerminalThemeId;
+        setTerminalTheme(val);
+        settings = { ...settings, terminalTheme: val };
+        onChange(settings);
+        paintTermTheme();
+      },
+    },
+    ...TERMINAL_THEME_CHOICES.map((t) => h('option', { value: t.id }, `${t.label} — ${t.description}`)),
+  ) as HTMLSelectElement;
+  const termThemeNote = h('p.setting-note');
+  const paintTermTheme = () => {
+    const cur = settings.terminalTheme ?? loadTerminalTheme();
+    termThemeSelect.value = cur;
+    const item = TERMINAL_THEME_CHOICES.find((t) => t.id === cur) ?? TERMINAL_THEME_CHOICES[0];
+    termThemeNote.textContent = `${item.description}. Changes apply immediately in all open and future terminals.`;
+  };
+  paintTermTheme();
 
   /** A volume slider with its mute button. Dragging it turns the sound back on; letting go plays `preview`. */
   const volumeRow = (label: string, level: 'volume' | 'music', muted: 'muted' | 'musicMuted', preview?: () => void) => {
@@ -507,6 +531,7 @@ export function openSettings(net: Net, settings: Settings, onChange: (s: Setting
     you: [
       setting('Your character', null, character),
       setting('Camera view', 'you', seg, note),
+      setting('Terminal theme', 'you', termThemeSelect, termThemeNote),
       setting('Signed in', null, h('div.volume', {}, signOut), h('p.setting-note', {}, account ? `As ${account.name}, with your own account (${account.role}).` : 'With the shared office password.')),
     ],
     sound: [

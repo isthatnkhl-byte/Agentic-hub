@@ -1,24 +1,10 @@
 import * as THREE from 'three';
 import { FLAG_BOLD, FLAG_DIM, FLAG_INVERSE, RGB_FLAG, type Run } from '../../shared/protocol';
 import { mesh, roundedBox, toon } from './toon';
-import { TERM_THEME } from '../ui/termtheme';
+import { TERM_THEME, getPalette } from '../ui/termtheme';
 
-
-const BASE16 = [
-  TERM_THEME.black, TERM_THEME.red, TERM_THEME.green, TERM_THEME.yellow, TERM_THEME.blue, TERM_THEME.magenta, TERM_THEME.cyan, TERM_THEME.white,
-  TERM_THEME.brightBlack, TERM_THEME.brightRed, TERM_THEME.brightGreen, TERM_THEME.brightYellow, TERM_THEME.brightBlue, TERM_THEME.brightMagenta, TERM_THEME.brightCyan, TERM_THEME.brightWhite,
-];
-
-const PALETTE: string[] = (() => {
-  const p = [...BASE16];
-  const steps = [0, 95, 135, 175, 215, 255];
-  for (let r = 0; r < 6; r++) for (let g = 0; g < 6; g++) for (let b = 0; b < 6; b++) p.push(`rgb(${steps[r]},${steps[g]},${steps[b]})`);
-  for (let i = 0; i < 24; i++) {
-    const v = 8 + i * 10;
-    p.push(`rgb(${v},${v},${v})`);
-  }
-  return p;
-})();
+let cachedThemeId = '';
+let cachedPalette: string[] = [];
 
 function color(c: number, fallback: string): string {
   if (c < 0) return fallback;
@@ -26,7 +12,11 @@ function color(c: number, fallback: string): string {
     const rgb = c & 0xffffff;
     return `rgb(${(rgb >> 16) & 255},${(rgb >> 8) & 255},${rgb & 255})`;
   }
-  return PALETTE[c] ?? fallback;
+  if (cachedThemeId !== TERM_THEME.id) {
+    cachedThemeId = TERM_THEME.id;
+    cachedPalette = getPalette(TERM_THEME);
+  }
+  return cachedPalette[c] ?? fallback;
 }
 
 export interface ScreenState {

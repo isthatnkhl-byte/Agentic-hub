@@ -527,6 +527,20 @@ body.telescope-active #hud { visibility: hidden; }
   opacity: 0.5;
   cursor: not-allowed;
 }
+.modal.term header .term-theme-select {
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--paper-2);
+  border: 2px solid var(--ink);
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.modal.term header .term-theme-select:hover {
+  background: var(--paper);
+}
 /* A narrow window: the name and ✕ keep the top row and the rest wraps under them, rather than pushing ✕ off the edge. */
 @media (max-width: 640px) {
   .modal.term header { flex-wrap: wrap; row-gap: 8px; }
