@@ -1595,3 +1595,46 @@ test('auto-approve toggles per worker, persists across office restarts, and upda
   assert.equal(restored?.autoApprove, true);
 });
 
+test('Antigravity auto-approve passes --dangerously-skip-permissions and writes confirmation on toggle', async (t) => {
+  const oldLog = process.env.FAKE_AGENT_LOG;
+  t.after(() => {
+    if (oldLog === undefined) delete process.env.FAKE_AGENT_LOG;
+    else process.env.FAKE_AGENT_LOG = oldLog;
+  });
+  const f = fixture();
+  t.after(() => f.close());
+  const updates: WorkerInfo[] = [];
+  process.env.FAKE_AGENT_LOG = f.log;
+  const workers = manager(f, f.antigravity, updates);
+  t.after(() => workers.shutdown());
+
+  // Spawn with autoApprove: true
+  const worker = workers.spawn('desk-1', 'test', 'antigravity task', false, 'agent', 'antigravity', undefined, undefined, undefined, undefined, [], undefined, undefined, true);
+  assert.equal(typeof worker, 'object');
+  if (typeof worker === 'string') return;
+
+  const launch = await waitFor(() => f.read(), (records) => records.some((record) => record.kind === 'antigravity'));
+  const invocation = launch.find((record) => record.kind === 'antigravity')!;
+  assert.ok(invocation.args.includes('--dangerously-skip-permissions'));
+  assert.equal(worker.autoApprove, true);
+
+  // Toggle off
+  assert.equal(workers.setAutoApprove(worker.id, false), true);
+  assert.equal(workers.get(worker.id)?.autoApprove, false);
+
+  // Toggle back on triggers attemptAutoApprove sending 'y\r' to Antigravity
+  assert.equal(workers.setAutoApprove(worker.id, true), true);
+  assert.equal(workers.get(worker.id)?.autoApprove, true);
+  const replies = await waitFor(() => f.read(), (records) => records.some((record) => record.stdin?.includes('y')));
+  assert.ok(replies.some((record) => record.stdin?.includes('y')));
+
+  // Restart office and verify persistence
+  workers.shutdown();
+  const restored = manager(f, f.antigravity, []);
+  t.after(() => restored.shutdown());
+  await restored.start();
+  assert.equal(restored.get(worker.id)?.provider, 'antigravity');
+  assert.equal(restored.get(worker.id)?.autoApprove, true);
+});
+
+

@@ -973,7 +973,7 @@ export class WorkerManager {
     w.dsh?.setAutoApprove(enabled);
     this.emitUpdate(w);
     this.persist();
-    if (enabled && (w.info.status === 'needs_input' || w.info.status === 'working')) {
+    if (enabled && (w.info.status === 'needs_input' || w.info.status === 'working' || w.info.provider === 'antigravity')) {
       this.attemptAutoApprove(w);
     }
     return true;
@@ -989,8 +989,9 @@ export class WorkerManager {
       return;
     }
     if (!w.pty || w.bootBlocked) return;
+    const isAntigravity = w.info.provider === 'antigravity';
     const text = w.term ? screenText(w.term) : '';
-    if (/\b\(?[yY]\/[nN]\)?/.test(text)) {
+    if (isAntigravity || /\b\(?[yY]\/[nN]\)?/.test(text)) {
       w.pty.write('y\r');
     } else {
       w.pty.write('1\r');
@@ -1671,6 +1672,7 @@ export class WorkerManager {
       // `--` so a prompt like "- fix login" is never parsed as a CLI option.
       if (prompt) args.push('--', prompt);
     } else if (isAntigravity) {
+      if (info.autoApprove && !args.includes('--dangerously-skip-permissions')) args.push('--dangerously-skip-permissions');
       if (!resumeSessionId && info.model) args.push('--model', info.model);
       if (info.effort) args.push('--effort', info.effort);
       if (resumeSessionId) args.push('--conversation', resumeSessionId);
